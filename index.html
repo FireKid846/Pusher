@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub File Pusher</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <i data-lucide="github"></i>
+                    <h1>GitHub Pusher</h1>
+                </div>
+                <div class="repo-indicator" id="repoIndicator">
+                    <i data-lucide="git-branch"></i>
+                    <span id="currentRepo">No repo selected</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Tab Navigation -->
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="settings">
+                <i data-lucide="settings"></i>
+                <span>Settings</span>
+            </button>
+            <button class="tab-btn" data-tab="files">
+                <i data-lucide="folder"></i>
+                <span>Files</span>
+            </button>
+            <button class="tab-btn" data-tab="batch">
+                <i data-lucide="layers"></i>
+                <span>Batch Ops</span>
+            </button>
+            <button class="tab-btn" data-tab="push">
+                <i data-lucide="upload-cloud"></i>
+                <span>Push</span>
+            </button>
+        </nav>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Settings Tab -->
+            <div class="tab-content active" id="settingsTab">
+                <div class="content-wrapper">
+                    <h2 class="tab-title">Configuration</h2>
+                    
+                    <div class="settings-grid">
+                        <div class="input-group">
+                            <label for="githubToken">
+                                <i data-lucide="key"></i>
+                                GitHub Token
+                            </label>
+                            <input type="password" id="githubToken" placeholder="ghp_xxxxxxxxxxxxx">
+                            <small>Personal access token with repo permissions</small>
+                        </div>
+
+                        <div class="input-group">
+                            <label for="githubUsername">
+                                <i data-lucide="user"></i>
+                                Username
+                            </label>
+                            <input type="text" id="githubUsername" placeholder="your-username">
+                        </div>
+
+                        <div class="input-group">
+                            <label for="repoName">
+                                <i data-lucide="git-branch"></i>
+                                Repository
+                            </label>
+                            <input type="text" id="repoName" placeholder="my-repo">
+                        </div>
+
+                        <div class="input-group">
+                            <label for="branchName">
+                                <i data-lucide="git-merge"></i>
+                                Branch
+                            </label>
+                            <input type="text" id="branchName" placeholder="main" value="main">
+                        </div>
+                    </div>
+
+                    <div class="action-buttons">
+                        <button class="btn btn-primary" id="saveConfig">
+                            <i data-lucide="save"></i>
+                            Save Configuration
+                        </button>
+                        <button class="btn btn-secondary" id="testConnection">
+                            <i data-lucide="zap"></i>
+                            Test Connection
+                        </button>
+                        <button class="btn btn-secondary" id="fetchRepo">
+                            <i data-lucide="download"></i>
+                            Fetch Repo Structure
+                        </button>
+                    </div>
+
+                    <!-- Saved Repos -->
+                    <div class="saved-repos" id="savedRepos">
+                        <h3>Saved Repositories</h3>
+                        <div class="repo-list" id="repoList">
+                            <!-- Dynamically populated -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Files Tab -->
+            <div class="tab-content" id="filesTab">
+                <div class="content-wrapper">
+                    <div class="files-header">
+                        <h2 class="tab-title">File Manager</h2>
+                        <div class="file-actions">
+                            <button class="btn btn-primary" id="uploadZip">
+                                <i data-lucide="file-archive"></i>
+                                Upload Zip
+                            </button>
+                            <button class="btn btn-secondary" id="downloadRepo">
+                                <i data-lucide="download"></i>
+                                Download Repo
+                            </button>
+                            <input type="file" id="zipInput" accept=".zip" style="display: none;">
+                        </div>
+                    </div>
+
+                    <div class="search-bar">
+                        <i data-lucide="search"></i>
+                        <input type="text" id="fileSearch" placeholder="Search files...">
+                    </div>
+
+                    <div class="files-layout">
+                        <div class="file-tree" id="fileTree">
+                            <div class="empty-state">
+                                <i data-lucide="folder-open"></i>
+                                <p>No files loaded</p>
+                                <small>Fetch repo structure or upload a zip</small>
+                            </div>
+                        </div>
+
+                        <div class="file-preview" id="filePreview">
+                            <div class="empty-state">
+                                <i data-lucide="file-text"></i>
+                                <p>Select a file to preview</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Batch Operations Tab -->
+            <div class="tab-content" id="batchTab">
+                <div class="content-wrapper">
+                    <h2 class="tab-title">Batch Operations</h2>
+
+                    <div class="batch-controls">
+                        <button class="btn btn-secondary" id="selectAll">
+                            <i data-lucide="check-square"></i>
+                            Select All
+                        </button>
+                        <button class="btn btn-secondary" id="deselectAll">
+                            <i data-lucide="square"></i>
+                            Deselect All
+                        </button>
+                        <span class="selection-count" id="selectionCount">0 selected</span>
+                    </div>
+
+                    <div class="batch-actions">
+                        <div class="action-card">
+                            <i data-lucide="trash-2"></i>
+                            <h3>Delete Selected</h3>
+                            <p>Remove selected files from the staging area</p>
+                            <button class="btn btn-danger" id="batchDelete">
+                                Delete
+                            </button>
+                        </div>
+
+                        <div class="action-card">
+                            <i data-lucide="edit-3"></i>
+                            <h3>Bulk Rename</h3>
+                            <div class="rename-inputs">
+                                <input type="text" id="renamePattern" placeholder="*.txt">
+                                <span>→</span>
+                                <input type="text" id="renameReplacement" placeholder="*.md">
+                            </div>
+                            <button class="btn btn-primary" id="batchRename">
+                                Rename
+                            </button>
+                        </div>
+
+                        <div class="action-card">
+                            <i data-lucide="folder-plus"></i>
+                            <h3>Move to Folder</h3>
+                            <input type="text" id="moveToFolder" placeholder="new/folder/path">
+                            <button class="btn btn-primary" id="batchMove">
+                                Move
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="selected-files" id="selectedFilesList">
+                        <h3>Selected Files</h3>
+                        <div class="file-chips">
+                            <!-- Dynamically populated -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Push Tab -->
+            <div class="tab-content" id="pushTab">
+                <div class="content-wrapper">
+                    <h2 class="tab-title">Push Changes</h2>
+
+                    <div class="changes-summary" id="changesSummary">
+                        <div class="stat-card">
+                            <i data-lucide="file-plus"></i>
+                            <span class="stat-value" id="addedCount">0</span>
+                            <span class="stat-label">Added</span>
+                        </div>
+                        <div class="stat-card">
+                            <i data-lucide="file-edit"></i>
+                            <span class="stat-value" id="modifiedCount">0</span>
+                            <span class="stat-label">Modified</span>
+                        </div>
+                        <div class="stat-card">
+                            <i data-lucide="file-minus"></i>
+                            <span class="stat-value" id="deletedCount">0</span>
+                            <span class="stat-label">Deleted</span>
+                        </div>
+                    </div>
+
+                    <div class="commit-section">
+                        <div class="input-group">
+                            <label for="commitMessage">
+                                <i data-lucide="message-square"></i>
+                                Commit Message
+                            </label>
+                            <textarea id="commitMessage" placeholder="Updated files..." rows="3"></textarea>
+                        </div>
+
+                        <button class="btn btn-primary btn-large" id="pushChanges">
+                            <i data-lucide="upload-cloud"></i>
+                            Push to GitHub
+                        </button>
+                    </div>
+
+                    <div class="changes-list" id="changesList">
+                        <h3>Changed Files</h3>
+                        <div class="changes-container">
+                            <!-- Dynamically populated -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Toast Notifications -->
+        <div class="toast-container" id="toastContainer"></div>
+
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="spinner"></div>
+            <p>Processing...</p>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="app.js"></script>
+    <script>
+        lucide.createIcons();
+    </script>
+</body>
+</html>
