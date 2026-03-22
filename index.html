@@ -1,278 +1,3160 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GitHub File Pusher</title>
-    <link rel="stylesheet" href="styles.css">
-    <script src="https://unpkg.com/lucide@latest"></script>
-</head>
-<body>
-    <div class="app-container">
-        <!-- Header -->
-        <header class="header">
-            <div class="header-content">
-                <div class="logo">
-                    <i data-lucide="github"></i>
-                    <h1>GitHub Pusher</h1>
-                </div>
-                <div class="repo-indicator" id="repoIndicator">
-                    <i data-lucide="git-branch"></i>
-                    <span id="currentRepo">No repo selected</span>
-                </div>
-            </div>
-        </header>
+// ForgeDB Worker v3
+// All fixes applied. All new features implemented.
 
-        <!-- Tab Navigation -->
-        <nav class="tab-nav">
-            <button class="tab-btn active" data-tab="settings">
-                <i data-lucide="settings"></i>
-                <span>Settings</span>
-            </button>
-            <button class="tab-btn" data-tab="files">
-                <i data-lucide="folder"></i>
-                <span>Files</span>
-            </button>
-            <button class="tab-btn" data-tab="batch">
-                <i data-lucide="layers"></i>
-                <span>Batch Ops</span>
-            </button>
-            <button class="tab-btn" data-tab="push">
-                <i data-lucide="upload-cloud"></i>
-                <span>Push</span>
-            </button>
-        </nav>
+const FRONTEND_URL = 'https://forgedb.name.ng';
+const API_URL      = 'https://api.forgedb.name.ng';
 
-        <!-- Main Content Area -->
-        <main class="main-content">
-            <!-- Settings Tab -->
-            <div class="tab-content active" id="settingsTab">
-                <div class="content-wrapper">
-                    <h2 class="tab-title">Configuration</h2>
-                    
-                    <div class="settings-grid">
-                        <div class="input-group">
-                            <label for="githubToken">
-                                <i data-lucide="key"></i>
-                                GitHub Token
-                            </label>
-                            <input type="password" id="githubToken" placeholder="ghp_xxxxxxxxxxxxx">
-                            <small>Personal access token with repo permissions</small>
-                        </div>
+// ─── Crypto Helpers ───────────────────────────────────────────────────────────
 
-                        <div class="input-group">
-                            <label for="githubUsername">
-                                <i data-lucide="user"></i>
-                                Username
-                            </label>
-                            <input type="text" id="githubUsername" placeholder="your-username">
-                        </div>
+function randomHex(bytes = 12) {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
-                        <div class="input-group">
-                            <label for="repoName">
-                                <i data-lucide="git-branch"></i>
-                                Repository
-                            </label>
-                            <input type="text" id="repoName" placeholder="my-repo">
-                        </div>
+async function sha256(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
-                        <div class="input-group">
-                            <label for="branchName">
-                                <i data-lucide="git-merge"></i>
-                                Branch
-                            </label>
-                            <input type="text" id="branchName" placeholder="main" value="main">
-                        </div>
-                    </div>
+async function hmacSign(message, secret) {
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
-                    <div class="action-buttons">
-                        <button class="btn btn-primary" id="saveConfig">
-                            <i data-lucide="save"></i>
-                            Save Configuration
-                        </button>
-                        <button class="btn btn-secondary" id="testConnection">
-                            <i data-lucide="zap"></i>
-                            Test Connection
-                        </button>
-                        <button class="btn btn-secondary" id="fetchRepo">
-                            <i data-lucide="download"></i>
-                            Fetch Repo Structure
-                        </button>
-                    </div>
+async function hashPassword(password, salt = null) {
+  const s = salt || randomHex(16);
+  const h = await hmacSign(password, s);
+  return { salt: s, hash: `${s}:${h}` };
+}
 
-                    <!-- Saved Repos -->
-                    <div class="saved-repos" id="savedRepos">
-                        <h3>Saved Repositories</h3>
-                        <div class="repo-list" id="repoList">
-                            <!-- Dynamically populated -->
-                        </div>
-                    </div>
-                </div>
-            </div>
+async function checkPassword(password, storedHash) {
+  const [salt] = storedHash.split(':');
+  const { hash } = await hashPassword(password, salt);
+  return hash === storedHash;
+}
 
-            <!-- Files Tab -->
-            <div class="tab-content" id="filesTab">
-                <div class="content-wrapper">
-                    <div class="files-header">
-                        <h2 class="tab-title">File Manager</h2>
-                        <div class="file-actions">
-                            <button class="btn btn-primary" id="uploadZip">
-                                <i data-lucide="file-archive"></i>
-                                Upload Zip
-                            </button>
-                            <button class="btn btn-secondary" id="downloadRepo">
-                                <i data-lucide="download"></i>
-                                Download Repo
-                            </button>
-                            <input type="file" id="zipInput" accept=".zip" style="display: none;">
-                        </div>
-                    </div>
+// ─── JWT Helpers ──────────────────────────────────────────────────────────────
 
-                    <div class="search-bar">
-                        <i data-lucide="search"></i>
-                        <input type="text" id="fileSearch" placeholder="Search files...">
-                    </div>
+function b64url(str) {
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
 
-                    <div class="files-layout">
-                        <div class="file-tree" id="fileTree">
-                            <div class="empty-state">
-                                <i data-lucide="folder-open"></i>
-                                <p>No files loaded</p>
-                                <small>Fetch repo structure or upload a zip</small>
-                            </div>
-                        </div>
+async function signJWT(payload, secret) {
+  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const body   = b64url(JSON.stringify(payload));
+  const data   = `${header}.${body}`;
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data));
+  const sigB64url = btoa(String.fromCharCode(...new Uint8Array(sig)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  return `${data}.${sigB64url}`;
+}
 
-                        <div class="file-preview" id="filePreview">
-                            <div class="empty-state">
-                                <i data-lucide="file-text"></i>
-                                <p>Select a file to preview</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+async function verifyJWT(token, secret) {
+  try {
+    const [header, body, sig] = token.split('.');
+    const data = `${header}.${body}`;
+    const key = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+    );
+    const sigBase64 = sig.replace(/-/g, '+').replace(/_/g, '/');
+    const sigBytes = Uint8Array.from(atob(sigBase64), c => c.charCodeAt(0));
+    const valid = await crypto.subtle.verify('HMAC', key, sigBytes, new TextEncoder().encode(data));
+    if (!valid) return null;
+    const payload = JSON.parse(atob(body.replace(/-/g, '+').replace(/_/g, '/')));
+    if (payload.exp) {
+      const expMs = payload.exp < 1e10 ? payload.exp * 1000 : payload.exp;
+      if (Date.now() > expMs) return null;
+    }
+    return payload;
+  } catch { return null; }
+}
 
-            <!-- Batch Operations Tab -->
-            <div class="tab-content" id="batchTab">
-                <div class="content-wrapper">
-                    <h2 class="tab-title">Batch Operations</h2>
+async function issueUserToken(user, secret) {
+  return signJWT(
+    { userId: user.id, email: user.email, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 },
+    secret
+  );
+}
 
-                    <div class="batch-controls">
-                        <button class="btn btn-secondary" id="selectAll">
-                            <i data-lucide="check-square"></i>
-                            Select All
-                        </button>
-                        <button class="btn btn-secondary" id="deselectAll">
-                            <i data-lucide="square"></i>
-                            Deselect All
-                        </button>
-                        <span class="selection-count" id="selectionCount">0 selected</span>
-                    </div>
+// ─── Response Helpers ─────────────────────────────────────────────────────────
 
-                    <div class="batch-actions">
-                        <div class="action-card">
-                            <i data-lucide="trash-2"></i>
-                            <h3>Delete Selected</h3>
-                            <p>Remove selected files from the staging area</p>
-                            <button class="btn btn-danger" id="batchDelete">
-                                Delete
-                            </button>
-                        </div>
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Forge-Key',
+  'Access-Control-Max-Age': '86400',
+};
 
-                        <div class="action-card">
-                            <i data-lucide="edit-3"></i>
-                            <h3>Bulk Rename</h3>
-                            <div class="rename-inputs">
-                                <input type="text" id="renamePattern" placeholder="*.txt">
-                                <span>→</span>
-                                <input type="text" id="renameReplacement" placeholder="*.md">
-                            </div>
-                            <button class="btn btn-primary" id="batchRename">
-                                Rename
-                            </button>
-                        </div>
+function jsonResp(data, status = 200, extra = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...CORS, ...extra },
+  });
+}
 
-                        <div class="action-card">
-                            <i data-lucide="folder-plus"></i>
-                            <h3>Move to Folder</h3>
-                            <input type="text" id="moveToFolder" placeholder="new/folder/path">
-                            <button class="btn btn-primary" id="batchMove">
-                                Move
-                            </button>
-                        </div>
-                    </div>
+function htmlResp(content, status = 200) {
+  return new Response(content, { status, headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+}
 
-                    <div class="selected-files" id="selectedFilesList">
-                        <h3>Selected Files</h3>
-                        <div class="file-chips">
-                            <!-- Dynamically populated -->
-                        </div>
-                    </div>
-                </div>
-            </div>
+function errResp(message, code, status = 400) {
+  return jsonResp({ error: message, code, status }, status);
+}
 
-            <!-- Push Tab -->
-            <div class="tab-content" id="pushTab">
-                <div class="content-wrapper">
-                    <h2 class="tab-title">Push Changes</h2>
+function redirectResp(location) {
+  return new Response(null, { status: 302, headers: { Location: location } });
+}
 
-                    <div class="changes-summary" id="changesSummary">
-                        <div class="stat-card">
-                            <i data-lucide="file-plus"></i>
-                            <span class="stat-value" id="addedCount">0</span>
-                            <span class="stat-label">Added</span>
-                        </div>
-                        <div class="stat-card">
-                            <i data-lucide="file-edit"></i>
-                            <span class="stat-value" id="modifiedCount">0</span>
-                            <span class="stat-label">Modified</span>
-                        </div>
-                        <div class="stat-card">
-                            <i data-lucide="file-minus"></i>
-                            <span class="stat-value" id="deletedCount">0</span>
-                            <span class="stat-label">Deleted</span>
-                        </div>
-                    </div>
+// ─── Normalizers ─────────────────────────────────────────────────────────────
 
-                    <div class="commit-section">
-                        <div class="input-group">
-                            <label for="commitMessage">
-                                <i data-lucide="message-square"></i>
-                                Commit Message
-                            </label>
-                            <textarea id="commitMessage" placeholder="Updated files..." rows="3"></textarea>
-                        </div>
+function normalizeUser(u) {
+  if (!u) return null;
+  const { password_hash, plan_expiry, provider_id, created_at, extra_projects, extra_reads, referred_by, referral_code, ...rest } = u;
+  return {
+    ...rest,
+    planExpiry: plan_expiry,
+    providerId: provider_id,
+    createdAt: created_at,
+    referralCode: referral_code,
+    extraProjects: extra_projects || 0,
+    extraReads: extra_reads || 0,
+  };
+}
 
-                        <button class="btn btn-primary btn-large" id="pushChanges">
-                            <i data-lucide="upload-cloud"></i>
-                            Push to GitHub
-                        </button>
-                    </div>
+function normalizeProject(p) {
+  const { created_at, ...rest } = p;
+  return { ...rest, createdAt: created_at };
+}
 
-                    <div class="changes-list" id="changesList">
-                        <h3>Changed Files</h3>
-                        <div class="changes-container">
-                            <!-- Dynamically populated -->
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </main>
+function normalizeKey(k) {
+  const { last_used, total_calls, project_id, key_type, created_at, expires_at, ...rest } = k;
+  return { ...rest, lastUsed: last_used, totalCalls: total_calls, projectId: project_id, keyType: key_type, createdAt: created_at, expiresAt: expires_at };
+}
 
-        <!-- Toast Notifications -->
-        <div class="toast-container" id="toastContainer"></div>
+function normalizeCliToken(t) {
+  const { created_at, user_id, ...rest } = t;
+  return { ...rest, createdAt: created_at, userId: user_id };
+}
 
-        <!-- Loading Overlay -->
-        <div class="loading-overlay" id="loadingOverlay">
-            <div class="spinner"></div>
-            <p>Processing...</p>
-        </div>
+function normalizeWebhook(w) {
+  const { last_triggered, success_rate, user_id, project_id, created_at, events_json, ...rest } = w;
+  return { ...rest, lastTriggered: last_triggered, successRate: success_rate, userId: user_id, projectId: project_id, createdAt: created_at, events: w.events || JSON.parse(events_json || '[]') };
+}
+
+function normalizeRow(r) {
+  const { created_at, updated_at, ...rest } = r;
+  return { ...rest, createdAt: created_at, updatedAt: updated_at };
+}
+
+// ─── Cookie Helper ────────────────────────────────────────────────────────────
+
+function getCookie(request, name) {
+  const cookies = request.headers.get('Cookie') || '';
+  const match = cookies.split(';').find(c => c.trim().startsWith(`${name}=`));
+  return match ? match.trim().slice(name.length + 1) : null;
+}
+
+// ─── Audit Logging ────────────────────────────────────────────────────────────
+
+async function writeAudit(env, userId, projectId, action, details, request) {
+  try {
+    const ip = request?.headers?.get('CF-Connecting-IP') || null;
+    await env.DB.prepare(
+      'INSERT INTO audit_log (id,user_id,project_id,action,details,ip,created_at) VALUES (?,?,?,?,?,?,?)'
+    ).bind(randomHex(8), userId, projectId || null, action, details ? JSON.stringify(details) : null, ip, new Date().toISOString()).run();
+  } catch {}
+}
+
+// ─── Request Logging ──────────────────────────────────────────────────────────
+
+async function writeRequestLog(env, userId, projectId, opts) {
+  try {
+    await env.DB.prepare(
+      'INSERT INTO request_logs (id,user_id,project_id,table_name,operation,status_code,duration_ms,key_prefix,db_env,error_msg,request_path,timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).bind(
+      randomHex(8), userId, projectId,
+      opts.table || null, opts.operation || null,
+      opts.statusCode || 200, opts.duration || 0,
+      opts.keyPrefix || null, opts.env || null,
+      opts.error || null, opts.path || null,
+      new Date().toISOString()
+    ).run();
+  } catch {}
+}
+
+// ─── Usage Tracking ───────────────────────────────────────────────────────────
+
+async function trackUsage(env, userId, projectId, type) {
+  try {
+    const month = new Date().toISOString().slice(0, 7);
+    const col   = type === 'write' ? 'writes' : 'reads';
+    await env.DB.prepare(
+      `INSERT INTO usage (user_id,project_id,month,reads,writes,storage_bytes) VALUES (?,?,?,0,0,0)
+       ON CONFLICT(user_id,project_id,month) DO UPDATE SET ${col}=${col}+1`
+    ).bind(userId, projectId, month).run();
+  } catch {}
+}
+
+// ─── D1 User Helpers ─────────────────────────────────────────────────────────
+
+function safeUser(u) {
+  if (!u) return null;
+  const { password_hash, ...safe } = u;
+  return safe;
+}
+
+async function dbGetUser(db, id) {
+  return db.prepare('SELECT * FROM users WHERE id = ?').bind(id).first();
+}
+
+async function dbGetUserByEmail(db, email) {
+  return db.prepare('SELECT * FROM users WHERE email = ?').bind(email.toLowerCase()).first();
+}
+
+async function dbGetUserByUsername(db, username) {
+  return db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').bind(username).first();
+}
+
+async function dbGetUserByProvider(db, provider, providerId) {
+  return db.prepare('SELECT * FROM users WHERE provider = ? AND provider_id = ?').bind(provider, String(providerId)).first();
+}
+
+async function dbCreateUser(db, { username, email, password, provider, providerId, avatar, referralCode }) {
+  const emailLower = email.toLowerCase();
+  if (await dbGetUserByEmail(db, emailLower)) throw new Error('Email already in use');
+  if (await dbGetUserByUsername(db, username))  throw new Error('Username already taken');
+
+  const id  = randomHex(12);
+  const now = new Date().toISOString();
+  const myReferralCode = randomHex(6).toUpperCase();
+  let passwordHash = null;
+  if (password) {
+    const ph = await hashPassword(password);
+    passwordHash = ph.hash;
+  }
+
+  await db.prepare(
+    'INSERT INTO users (id,username,email,password_hash,provider,provider_id,avatar,plan,plan_expiry,referral_code,extra_projects,extra_reads,created_at) VALUES (?,?,?,?,?,?,?,\'free\',NULL,?,0,0,?)'
+  ).bind(id, username, emailLower, passwordHash, provider || null, providerId ? String(providerId) : null, avatar || null, myReferralCode, now).run();
+
+  // referred_by stored separately — non-fatal if column doesn't exist yet
+  if (referralCode) {
+    db.prepare('UPDATE users SET referred_by=? WHERE id=?').bind(referralCode, id).run().catch(() => {});
+  }
+
+  return dbGetUser(db, id);
+}
+
+async function resolveUsername(db, base) {
+  let username = base.replace(/[^a-z0-9-]/gi, '').toLowerCase().slice(0, 24) || 'user';
+  const existing = await dbGetUserByUsername(db, username);
+  if (!existing) return username;
+  const suffix = Math.floor(Math.random() * 9000) + 1000;
+  return `${username.slice(0, 19)}${suffix}`;
+}
+
+// ─── Auth Middleware ──────────────────────────────────────────────────────────
+
+async function requireUser(request, env) {
+  const authHeader = request.headers.get('Authorization');
+  const token = authHeader?.replace(/^Bearer\s+/i, '') || getCookie(request, 'forge_token');
+  if (!token) return null;
+  const payload = await verifyJWT(token, env.JWT_SECRET);
+  if (!payload?.userId) return null;
+  const user = await dbGetUser(env.DB, payload.userId);
+  return user ? normalizeUser(user) : null;
+}
+
+async function requireDbPassword(request, env, projectId) {
+  const key =
+    request.headers.get('X-Forge-Key') ||
+    request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
+  if (!key) return null;
+  const record = await env.DB.prepare('SELECT * FROM db_passwords WHERE project_id = ?').bind(projectId).first();
+  if (!record) return null;
+  const ok = await checkPassword(key, record.hash);
+  if (!ok) return null;
+  return { userId: record.user_id, projectId };
+}
+
+function generateKey(keyEnv, keyType) {
+  const prefixes = {
+    forge:   { test: 'fk_test_', prod: 'fk_live_' },
+    service: { test: 'sk_test_', prod: 'sk_live_' },
+    custom:  { test: 'ck_',      prod: 'ck_' },
+  };
+  const prefix = prefixes[keyType]?.[keyEnv] || 'ck_';
+  const length = keyType === 'forge' ? 16 : 32;
+  const chars  = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const rand   = crypto.getRandomValues(new Uint8Array(length));
+  let k = prefix;
+  for (let i = 0; i < length; i++) k += chars[rand[i] % chars.length];
+  return k;
+}
+
+// ─── Schema Validation ────────────────────────────────────────────────────────
+
+function coerceValue(value, type) {
+  if (value === null || value === undefined) return value;
+  switch (type) {
+    case 'number':  { const n = Number(value); return isNaN(n) ? null : n; }
+    case 'boolean': { if (typeof value === 'boolean') return value; return value === 'true' || value === '1' || value === 1; }
+    case 'string':  return String(value);
+    default:        return value;
+  }
+}
+
+function validateRow(data, columns) {
+  const errors = [];
+  for (const def of columns) {
+    const value = data[def.name];
+    if (def.required && (value === undefined || value === null || value === '')) {
+      errors.push(`'${def.name}' is required`); continue;
+    }
+    if (value === undefined || value === null) continue;
+    if (def.type === 'number' && (typeof value !== 'number' || isNaN(value)))
+      errors.push(`'${def.name}' must be a number`);
+    if (def.type === 'boolean' && typeof value !== 'boolean')
+      errors.push(`'${def.name}' must be a boolean`);
+    if (def.type === 'string' && def.maxLength && String(value).length > def.maxLength)
+      errors.push(`'${def.name}' exceeds max length of ${def.maxLength}`);
+    if (def.enum && !def.enum.includes(value))
+      errors.push(`'${def.name}' must be one of: ${def.enum.join(', ')}`);
+  }
+  return errors;
+}
+
+function applyDefaults(data, columns) {
+  const result = { ...data };
+  for (const col of columns) {
+    if (result[col.name] === undefined && col.default !== undefined)
+      result[col.name] = col.default;
+  }
+  return result;
+}
+
+async function enforceUnique(db, userId, projectId, env, table, data, columns, excludeId = null) {
+  const uniqueCols = columns.filter(c => c.unique);
+  for (const col of uniqueCols) {
+    if (data[col.name] === undefined) continue;
+    const { results } = await db.prepare(
+      'SELECT forge_id,data_json FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=?'
+    ).bind(userId, projectId, env, table).all();
+    const conflict = results.find(r => {
+      if (excludeId !== null && r.forge_id === excludeId) return false;
+      const rowData = JSON.parse(r.data_json || '{}');
+      return rowData[col.name] === data[col.name];
+    });
+    if (conflict) return `'${col.name}' must be unique — value '${data[col.name]}' already exists`;
+  }
+  return null;
+}
+
+// ─── SQL Security ─────────────────────────────────────────────────────────────
+
+const SQL_BLOCKLIST = [
+  /\bPRAGMA\b/i,
+  /\bATTACH\b/i,
+  /\bDETACH\b/i,
+  /\bLOAD_EXTENSION\b/i,
+  /\bSQLITE_MASTER\b/i,
+  /\bSQLITE_TEMP_MASTER\b/i,
+  /\binformation_schema\b/i,
+];
+
+const SQL_DDL_BLOCKLIST = [
+  /\bDROP\s+DATABASE\b/i,
+  /\bTRUNCATE\b/i,
+  /\bALTER\s+TABLE\b/i,  // handled via UI
+];
+
+function checkSQLSafety(sql) {
+  // Block multiple statements
+  const stripped = sql.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+  const stmts = stripped.split(';').filter(s => s.trim());
+  if (stmts.length > 1) return 'Multiple statements are not allowed. Run one statement at a time.';
+
+  for (const pattern of SQL_BLOCKLIST) {
+    if (pattern.test(sql)) return `Blocked: ${pattern.source.replace(/\\b/g, '')} is not permitted`;
+  }
+  for (const pattern of SQL_DDL_BLOCKLIST) {
+    if (pattern.test(sql)) return `Use the table manager to perform schema changes`;
+  }
+  return null;
+}
+
+function detectStatementType(sql) {
+  const t = sql.trim().toUpperCase();
+  if (t.startsWith('SELECT')) return 'SELECT';
+  if (t.startsWith('INSERT')) return 'INSERT';
+  if (t.startsWith('UPDATE')) return 'UPDATE';
+  if (t.startsWith('DELETE')) return 'DELETE';
+  if (t.startsWith('CREATE TABLE')) return 'CREATE_TABLE';
+  if (t.startsWith('DROP TABLE')) return 'DROP_TABLE';
+  return 'UNKNOWN';
+}
+
+// ─── SQL Query Engine ─────────────────────────────────────────────────────────
+
+function sqlLike(value, pattern) {
+  const regex = '^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.') + '$';
+  return new RegExp(regex, 'i').test(String(value ?? ''));
+}
+
+function evalCondition(row, cond) {
+  const { col, op, val } = cond;
+  const rv = row[col];
+  switch (op) {
+    case '=':        return rv == val;
+    case '!=':
+    case '<>':       return rv != val;
+    case '>':        return Number(rv) > Number(val);
+    case '<':        return Number(rv) < Number(val);
+    case '>=':       return Number(rv) >= Number(val);
+    case '<=':       return Number(rv) <= Number(val);
+    case 'LIKE':     return sqlLike(rv, val);
+    case 'NOT LIKE': return !sqlLike(rv, val);
+    case 'IS NULL':  return rv === null || rv === undefined;
+    case 'IS NOT NULL': return rv !== null && rv !== undefined;
+    case 'IN':       return Array.isArray(val) && val.includes(rv);
+    case 'NOT IN':   return Array.isArray(val) && !val.includes(val);
+    default:         return true;
+  }
+}
+
+function evalWhere(row, node) {
+  if (!node) return true;
+  if (node.type === 'condition') return evalCondition(row, node);
+  if (node.type === 'AND') return evalWhere(row, node.left) && evalWhere(row, node.right);
+  if (node.type === 'OR')  return evalWhere(row, node.left) || evalWhere(row, node.right);
+  if (node.type === 'NOT') return !evalWhere(row, node.child);
+  return true;
+}
+
+function parseValue(raw) {
+  if (raw === null || raw === undefined) return null;
+  const s = raw.trim();
+  if (s === 'NULL' || s === 'null') return null;
+  if (s === 'TRUE' || s === 'true') return true;
+  if (s === 'FALSE' || s === 'false') return false;
+  if ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith('"') && s.endsWith('"'))) return s.slice(1, -1);
+  if (!isNaN(s) && s !== '') return Number(s);
+  return s;
+}
+
+function parseInValues(str) {
+  return str.split(',').map(s => parseValue(s.trim()));
+}
+
+// Simple WHERE tokenizer and parser
+function tokenizeWhere(str) {
+  const tokens = [];
+  let i = 0;
+  while (i < str.length) {
+    if (/\s/.test(str[i])) { i++; continue; }
+    if (str[i] === '(') { tokens.push({ type: 'LPAREN' }); i++; continue; }
+    if (str[i] === ')') { tokens.push({ type: 'RPAREN' }); i++; continue; }
+    // String literals
+    if (str[i] === "'" || str[i] === '"') {
+      const q = str[i]; let val = ''; i++;
+      while (i < str.length && str[i] !== q) { val += str[i]; i++; }
+      i++; tokens.push({ type: 'VALUE', value: val }); continue;
+    }
+    // Keywords and identifiers
+    if (/[a-zA-Z_]/.test(str[i])) {
+      let word = '';
+      while (i < str.length && /[a-zA-Z0-9_.]/.test(str[i])) { word += str[i]; i++; }
+      const upper = word.toUpperCase();
+      if (upper === 'AND') tokens.push({ type: 'AND' });
+      else if (upper === 'OR') tokens.push({ type: 'OR' });
+      else if (upper === 'NOT') tokens.push({ type: 'NOT' });
+      else if (upper === 'NULL') tokens.push({ type: 'VALUE', value: null });
+      else if (upper === 'TRUE') tokens.push({ type: 'VALUE', value: true });
+      else if (upper === 'FALSE') tokens.push({ type: 'VALUE', value: false });
+      else if (upper === 'IS') tokens.push({ type: 'IS' });
+      else if (upper === 'IN') tokens.push({ type: 'IN' });
+      else if (upper === 'LIKE') tokens.push({ type: 'OP', value: 'LIKE' });
+      else tokens.push({ type: 'IDENT', value: word });
+      continue;
+    }
+    // Operators
+    if (str[i] === '<' || str[i] === '>' || str[i] === '!' || str[i] === '=') {
+      let op = str[i]; i++;
+      if (i < str.length && (str[i] === '=' || str[i] === '>')) { op += str[i]; i++; }
+      tokens.push({ type: 'OP', value: op }); continue;
+    }
+    // Numbers
+    if (/[0-9\-.]/.test(str[i])) {
+      let num = '';
+      while (i < str.length && /[0-9.\-]/.test(str[i])) { num += str[i]; i++; }
+      tokens.push({ type: 'VALUE', value: parseFloat(num) }); continue;
+    }
+    i++;
+  }
+  return tokens;
+}
+
+function parseWhereTokens(tokens) {
+  let pos = 0;
+
+  function peek() { return tokens[pos]; }
+  function consume() { return tokens[pos++]; }
+
+  function parseExpr() { return parseOr(); }
+
+  function parseOr() {
+    let left = parseAnd();
+    while (peek()?.type === 'OR') {
+      consume();
+      const right = parseAnd();
+      left = { type: 'OR', left, right };
+    }
+    return left;
+  }
+
+  function parseAnd() {
+    let left = parseNot();
+    while (peek()?.type === 'AND') {
+      consume();
+      const right = parseNot();
+      left = { type: 'AND', left, right };
+    }
+    return left;
+  }
+
+  function parseNot() {
+    if (peek()?.type === 'NOT') {
+      consume();
+      return { type: 'NOT', child: parsePrimary() };
+    }
+    return parsePrimary();
+  }
+
+  function parsePrimary() {
+    if (peek()?.type === 'LPAREN') {
+      consume();
+      const expr = parseExpr();
+      if (peek()?.type === 'RPAREN') consume();
+      return expr;
+    }
+
+    const col = consume();
+    if (!col || col.type !== 'IDENT') return null;
+
+    const colName = col.value;
+
+    // IS NULL / IS NOT NULL
+    if (peek()?.type === 'IS') {
+      consume();
+      if (peek()?.type === 'NOT') {
+        consume();
+        if (peek()?.type === 'VALUE' && peek()?.value === null) consume();
+        return { type: 'condition', col: colName, op: 'IS NOT NULL', val: null };
+      }
+      if (peek()?.type === 'VALUE' && peek()?.value === null) consume();
+      return { type: 'condition', col: colName, op: 'IS NULL', val: null };
+    }
+
+    // IN (...)
+    if (peek()?.type === 'IN') {
+      consume();
+      if (peek()?.type === 'LPAREN') {
+        consume();
+        const vals = [];
+        while (peek() && peek().type !== 'RPAREN') {
+          const v = consume();
+          if (v.type === 'VALUE') vals.push(v.value);
+        }
+        if (peek()?.type === 'RPAREN') consume();
+        return { type: 'condition', col: colName, op: 'IN', val: vals };
+      }
+    }
+
+    // NOT LIKE / NOT IN
+    if (peek()?.type === 'NOT') {
+      consume();
+      if (peek()?.type === 'IN') {
+        consume();
+        if (peek()?.type === 'LPAREN') {
+          consume();
+          const vals = [];
+          while (peek() && peek().type !== 'RPAREN') {
+            const v = consume();
+            if (v.type === 'VALUE') vals.push(v.value);
+          }
+          if (peek()?.type === 'RPAREN') consume();
+          return { type: 'condition', col: colName, op: 'NOT IN', val: vals };
+        }
+      }
+      if (peek()?.type === 'OP' && peek()?.value === 'LIKE') {
+        consume();
+        const v = consume();
+        return { type: 'condition', col: colName, op: 'NOT LIKE', val: v?.value };
+      }
+    }
+
+    const op = consume();
+    if (!op || op.type !== 'OP') return null;
+
+    const val = consume();
+    return { type: 'condition', col: colName, op: op.value, val: val?.value };
+  }
+
+  return parseExpr();
+}
+
+function parseWhere(whereStr) {
+  if (!whereStr) return null;
+  const tokens = tokenizeWhere(whereStr);
+  return parseWhereTokens(tokens);
+}
+
+// Extract the WHERE string from a SQL statement
+function extractWhere(sql) {
+  const m = sql.match(/\bWHERE\b(.+?)(?:\bGROUP BY\b|\bORDER BY\b|\bLIMIT\b|\bHAVING\b|$)/is);
+  return m ? m[1].trim() : null;
+}
+
+function extractGroupBy(sql) {
+  const m = sql.match(/\bGROUP BY\b(.+?)(?:\bHAVING\b|\bORDER BY\b|\bLIMIT\b|$)/is);
+  return m ? m[1].trim().split(',').map(s => s.trim()) : null;
+}
+
+function extractHaving(sql) {
+  const m = sql.match(/\bHAVING\b(.+?)(?:\bORDER BY\b|\bLIMIT\b|$)/is);
+  return m ? m[1].trim() : null;
+}
+
+function extractOrderBy(sql) {
+  const m = sql.match(/\bORDER BY\b(.+?)(?:\bLIMIT\b|$)/is);
+  if (!m) return [];
+  return m[1].trim().split(',').map(part => {
+    const p = part.trim().split(/\s+/);
+    return { col: p[0], dir: (p[1] || 'ASC').toUpperCase() };
+  });
+}
+
+function extractLimit(sql) {
+  const m = sql.match(/\bLIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?/i);
+  if (!m) return { limit: 100, offset: 0 };
+  return { limit: parseInt(m[1]), offset: parseInt(m[2] || '0') };
+}
+
+function extractTableFromSelect(sql) {
+  const m = sql.match(/\bFROM\s+(\w+)/i);
+  return m ? m[1] : null;
+}
+
+function extractColumns(sql) {
+  const m = sql.match(/^SELECT\s+(.*?)\s+FROM/is);
+  if (!m) return ['*'];
+  const raw = m[1].trim();
+  if (raw === '*') return ['*'];
+  return raw.split(',').map(s => s.trim());
+}
+
+function applyAggregate(fn, values) {
+  if (fn === 'COUNT') return values.length;
+  const nums = values.filter(v => v !== null && v !== undefined && !isNaN(Number(v))).map(Number);
+  if (fn === 'SUM') return nums.reduce((a, b) => a + b, 0);
+  if (fn === 'AVG') return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+  if (fn === 'MIN') return nums.length ? Math.min(...nums) : null;
+  if (fn === 'MAX') return nums.length ? Math.max(...nums) : null;
+  return null;
+}
+
+function isAggregate(colExpr) {
+  return /^(COUNT|SUM|AVG|MIN|MAX)\s*\(/i.test(colExpr);
+}
+
+function parseAggregate(colExpr) {
+  const m = colExpr.match(/^(\w+)\s*\(\s*(\*|\w+)\s*\)(?:\s+(?:AS\s+)?(\w+))?$/i);
+  if (!m) return null;
+  return { fn: m[1].toUpperCase(), col: m[2], alias: m[3] || `${m[1].toLowerCase()}(${m[2]})` };
+}
+
+function execSelect(rows, sql) {
+  const table = extractTableFromSelect(sql);
+  const colExprs = extractColumns(sql);
+  const whereStr = extractWhere(sql);
+  const groupByStr = extractGroupBy(sql);
+  const havingStr = extractHaving(sql);
+  const orderBys = extractOrderBy(sql);
+  const { limit, offset } = extractLimit(sql);
+
+  // Filter
+  let filtered = rows;
+  if (whereStr) {
+    const whereTree = parseWhere(whereStr);
+    filtered = rows.filter(r => evalWhere(r, whereTree));
+  }
+
+  // Group by / aggregates
+  const hasAgg = colExprs.some(c => c === '*' ? false : isAggregate(c));
+  if (groupByStr || hasAgg) {
+    // Parse column expressions
+    const parsed = colExprs.map(expr => {
+      if (expr === '*') return { type: 'all' };
+      if (isAggregate(expr)) return { type: 'agg', ...parseAggregate(expr) };
+      const m = expr.match(/^(\w+)(?:\s+(?:AS\s+)?(\w+))?$/i);
+      return { type: 'col', col: m ? m[1] : expr, alias: m?.[2] };
+    });
+
+    const groupKeys = groupByStr || [];
+    // Group rows
+    const groups = {};
+    for (const row of filtered) {
+      const key = groupKeys.map(k => String(row[k])).join('|') || '__all__';
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(row);
+    }
+
+    let result = Object.entries(groups).map(([, grpRows]) => {
+      const out = {};
+      for (const p of parsed) {
+        if (p.type === 'col') out[p.alias || p.col] = grpRows[0][p.col];
+        if (p.type === 'agg') out[p.alias] = applyAggregate(p.fn, grpRows.map(r => p.col === '*' ? 1 : r[p.col]));
+      }
+      return out;
+    });
+
+    // HAVING filter
+    if (havingStr) {
+      const havingTree = parseWhere(havingStr);
+      result = result.filter(r => evalWhere(r, havingTree));
+    }
+
+    // ORDER BY on result
+    for (const { col, dir } of [...orderBys].reverse()) {
+      result.sort((a, b) => {
+        if (a[col] < b[col]) return dir === 'DESC' ? 1 : -1;
+        if (a[col] > b[col]) return dir === 'DESC' ? -1 : 1;
+        return 0;
+      });
+    }
+
+    const total = result.length;
+    return { rows: result.slice(offset, offset + limit), total, rowsAffected: null };
+  }
+
+  // ORDER BY
+  for (const { col, dir } of [...orderBys].reverse()) {
+    filtered.sort((a, b) => {
+      if (a[col] === undefined) return 1;
+      if (b[col] === undefined) return -1;
+      if (a[col] < b[col]) return dir === 'DESC' ? 1 : -1;
+      if (a[col] > b[col]) return dir === 'DESC' ? -1 : 1;
+      return 0;
+    });
+  }
+
+  const total = filtered.length;
+  let sliced = filtered.slice(offset, offset + limit);
+
+  // Project columns
+  if (!colExprs.includes('*')) {
+    sliced = sliced.map(row => {
+      const out = {};
+      for (const expr of colExprs) {
+        const m = expr.match(/^(\w+)(?:\s+(?:AS\s+)?(\w+))?$/i);
+        const col = m ? m[1] : expr;
+        const alias = m?.[2] || col;
+        out[alias] = row[col];
+      }
+      return out;
+    });
+  }
+
+  return { rows: sliced, total, rowsAffected: null };
+}
+
+// Parse INSERT INTO tableName (col1, col2) VALUES (val1, val2)
+function parseInsertSQL(sql) {
+  const m = sql.match(/INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/is);
+  if (!m) {
+    // Try INSERT INTO tableName VALUES (...)
+    const m2 = sql.match(/INSERT\s+INTO\s+(\w+)\s+VALUES\s*\(([^)]+)\)/is);
+    if (!m2) return null;
+    return { table: m2[1], cols: null, vals: m2[2].split(',').map(s => parseValue(s.trim())) };
+  }
+  const cols = m[2].split(',').map(s => s.trim());
+  const vals = m[3].split(',').map(s => parseValue(s.trim()));
+  const data = {};
+  cols.forEach((c, i) => { data[c] = vals[i]; });
+  return { table: m[1], data };
+}
+
+// Parse UPDATE tableName SET col1=val1, col2=val2 WHERE id=X
+function parseUpdateSQL(sql) {
+  const mTable = sql.match(/UPDATE\s+(\w+)\s+SET/i);
+  if (!mTable) return null;
+  const table = mTable[1];
+
+  const mSet = sql.match(/SET\s+(.+?)(?:\s+WHERE\s+|$)/is);
+  if (!mSet) return null;
+  const setPairs = mSet[1].trim().split(',').map(pair => {
+    const [k, ...v] = pair.trim().split('=');
+    return { col: k.trim(), val: parseValue(v.join('=').trim()) };
+  });
+  const updates = {};
+  setPairs.forEach(p => { updates[p.col] = p.val; });
+
+  const whereStr = extractWhere(sql);
+  return { table, updates, whereStr };
+}
+
+// Parse DELETE FROM tableName WHERE ...
+function parseDeleteSQL(sql) {
+  const m = sql.match(/DELETE\s+FROM\s+(\w+)/i);
+  if (!m) return null;
+  const whereStr = extractWhere(sql);
+  return { table: m[1], whereStr };
+}
+
+// Parse CREATE TABLE tableName (col1 TYPE constraints, ...)
+function parseCreateTableSQL(sql) {
+  const m = sql.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\((.+)\)/is);
+  if (!m) return null;
+  const tableName = m[1];
+  const colDefs = m[2].trim().split(/,(?![^(]*\))/);
+  const columns = [];
+  for (const def of colDefs) {
+    const parts = def.trim().split(/\s+/);
+    if (!parts[0]) continue;
+    const name = parts[0];
+    const type = parts[1]?.toUpperCase() || 'TEXT';
+    const required = /NOT\s+NULL/i.test(def);
+    const unique = /UNIQUE/i.test(def);
+    const defaultMatch = def.match(/DEFAULT\s+(\S+)/i);
+    const defaultVal = defaultMatch ? parseValue(defaultMatch[1]) : undefined;
+    const forgeType = type === 'INTEGER' || type === 'REAL' || type === 'NUMERIC' ? 'number'
+      : type === 'BOOLEAN' ? 'boolean'
+      : 'string';
+    const col = { name, type: forgeType, required, unique };
+    if (defaultVal !== undefined) col.default = defaultVal;
+    columns.push(col);
+  }
+  return { tableName, columns };
+}
+
+function parseDropTableSQL(sql) {
+  const m = sql.match(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)/i);
+  return m ? m[1] : null;
+}
+
+// ─── OAuth Helpers ───────────────────────────────────────────────────────────
+
+async function oauthGet(url, headers = {}) {
+  const res = await fetch(url, { headers: { 'User-Agent': 'ForgeDB/3.0', ...headers } });
+  return res.json().catch(() => ({}));
+}
+
+async function oauthPost(url, body, headers = {}) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': 'ForgeDB/3.0', ...headers },
+    body: JSON.stringify(body),
+  });
+  return res.json().catch(() => ({}));
+}
+
+// ─── Email ────────────────────────────────────────────────────────────────────
+
+async function sendEmail(env, { to, subject, html }) {
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: 'Firekid from ForgeDB <noreply@forgedb.name.ng>', to: [to], subject, html }),
+    });
+    if (!res.ok) console.error('[email] Resend error:', await res.text());
+  } catch (e) { console.error('[email] Failed:', e.message); }
+}
+
+function emailBase({ badge = '', badgeColor = '#4ade80', badgeBg = '#0d2018', badgeBorder = '#1a4030', accentBar = '#4ade80', content = '', footer = '' } = {}) {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#111111;font-family:'Courier New',Courier,monospace;">
+<div style="max-width:600px;margin:0 auto;padding:32px 16px;">
+<div style="background:#080808;border-radius:4px;overflow:hidden;">
+
+  <!-- Header -->
+  <div style="padding:26px 36px;border-bottom:1px solid #141414;display:flex;align-items:center;justify-content:space-between;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div style="width:26px;height:26px;background:#ffffff;border-radius:5px;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+        <span style="font-size:13px;color:#000000;font-weight:700;line-height:1;">F</span>
+      </div>
+      <span style="font-size:14px;font-weight:700;color:#f0f0f0;letter-spacing:-0.02em;">ForgeDB</span>
     </div>
+    ${badge ? `<span style="font-size:10px;font-weight:700;color:${badgeColor};background:${badgeBg};border:1px solid ${badgeBorder};border-radius:20px;padding:3px 10px;letter-spacing:0.06em;text-transform:uppercase;">${badge}</span>` : ''}
+  </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    <script src="app.js"></script>
-    <script>
-        lucide.createIcons();
-    </script>
-</body>
-</html>
+  <!-- Accent stripe -->
+  <div style="height:2px;background:linear-gradient(90deg,${accentBar} 0%,#1a1a1a 70%,#080808 100%);"></div>
+
+  <!-- Body -->
+  <div style="padding:36px 36px 28px;">
+    ${content}
+  </div>
+
+  <!-- Footer -->
+  <div style="padding:20px 36px;border-top:1px solid #141414;background:#050505;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <span style="font-size:11px;color:#333;font-family:'Courier New',monospace;">Firekid from ForgeDB</span>
+      <span style="font-size:10px;color:#222;">forgedb.name.ng</span>
+    </div>
+    <p style="font-size:11px;color:#252525;line-height:1.7;margin:0;">${footer || 'This is a transactional email from ForgeDB. No marketing, no unsubscribe needed.'}</p>
+  </div>
+
+</div>
+</div>
+</body></html>`;
+}
+
+// ── Welcome ──────────────────────────────────────────────────────────────────
+async function sendWelcomeEmail(env, { email, username }) {
+  await sendEmail(env, {
+    to: email,
+    subject: 'Firekid from ForgeDB — Welcome, your account is live',
+    html: emailBase({
+      badge: 'Account Active',
+      badgeColor: '#4ade80',
+      badgeBg: '#0d2018',
+      badgeBorder: '#1a4030',
+      accentBar: '#4ade80',
+      content: `
+        <p style="font-size:11px;color:#4ade80;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 10px;">Welcome aboard</p>
+        <p style="font-size:22px;font-weight:700;color:#ffffff;margin:0 0 6px;letter-spacing:-0.03em;line-height:1.2;">Good to have you,<br><span style="color:#ffffff;">${username}.</span></p>
+        <p style="font-size:12px;color:#2e2e2e;margin:0 0 28px;">Firekid from ForgeDB &lt;noreply@forgedb.name.ng&gt;</p>
+
+        <div style="height:1px;background:#141414;margin:0 0 28px;"></div>
+
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 16px;">Your account is live. ForgeDB gives you a reliable database with a full REST API, time travel, and zero infrastructure to manage. Your data has a complete audit trail from day one.</p>
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 32px;">Create a project, define your tables, grab an API key, and start reading and writing data from any runtime — Node.js, the browser, edge functions, or curl.</p>
+
+        <!-- Stats -->
+        <div style="display:flex;margin:0 0 32px;border:1px solid #141414;border-radius:6px;overflow:hidden;">
+          <div style="flex:1;padding:16px 18px;border-right:1px solid #141414;background:#0a0a0a;">
+            <div style="font-size:10px;color:#3a3a3a;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:5px;">Projects</div>
+            <div style="font-size:20px;font-weight:700;color:#4ade80;line-height:1;">3</div>
+            <div style="font-size:11px;color:#3a3a3a;margin-top:3px;">on free plan</div>
+          </div>
+          <div style="flex:1;padding:16px 18px;border-right:1px solid #141414;background:#0a0a0a;">
+            <div style="font-size:10px;color:#3a3a3a;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:5px;">Rows / table</div>
+            <div style="font-size:20px;font-weight:700;color:#f0f0f0;line-height:1;">10,000</div>
+            <div style="font-size:11px;color:#3a3a3a;margin-top:3px;">free forever</div>
+          </div>
+          <div style="flex:1;padding:16px 18px;background:#0a0a0a;">
+            <div style="font-size:10px;color:#3a3a3a;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:5px;">Time Travel</div>
+            <div style="font-size:20px;font-weight:700;color:#f0f0f0;line-height:1;">7 days</div>
+            <div style="font-size:11px;color:#3a3a3a;margin-top:3px;">full history</div>
+          </div>
+        </div>
+
+        <!-- Steps -->
+        <p style="font-size:10px;color:#3a3a3a;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 12px;">Get started in 3 steps</p>
+        <div style="margin:0 0 32px;">
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #4ade80;border-radius:6px;margin-bottom:8px;">
+            <span style="font-size:10px;font-weight:700;color:#4ade80;flex-shrink:0;margin-top:2px;">01</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:#f0f0f0;margin-bottom:3px;">Create a project</div>
+              <div style="font-size:12px;color:#555;line-height:1.6;">Name your project — it becomes your subdomain. Each project gets a prod and test environment automatically.</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #555;border-radius:6px;margin-bottom:8px;">
+            <span style="font-size:10px;font-weight:700;color:#888;flex-shrink:0;margin-top:2px;">02</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:#f0f0f0;margin-bottom:3px;">Create a table and grab an API key</div>
+              <div style="font-size:12px;color:#555;line-height:1.6;">Define your schema, then generate a read or read-write key. Your key prefix tells you exactly what it can access.</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #f0f0f0;border-radius:6px;">
+            <span style="font-size:10px;font-weight:700;color:#f0f0f0;flex-shrink:0;margin-top:2px;">03</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:#f0f0f0;margin-bottom:3px;">Hit the API</div>
+              <div style="font-size:12px;color:#555;line-height:1.6;">Your base URL is <span style="color:#9a9a9a;font-family:'Courier New',monospace;">PROJECT_ID.forgedb.name.ng</span>. Send a GET or POST and you're reading and writing data.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Code block -->
+        <div style="background:#050505;border:1px solid #141414;border-radius:6px;overflow:hidden;margin:0 0 32px;">
+          <div style="padding:9px 16px;border-bottom:1px solid #141414;display:flex;align-items:center;gap:6px;">
+            <div style="width:8px;height:8px;border-radius:50%;background:#ef4444;"></div>
+            <div style="width:8px;height:8px;border-radius:50%;background:#3a3a3a;"></div>
+            <div style="width:8px;height:8px;border-radius:50%;background:#4ade80;"></div>
+            <span style="font-size:10px;color:#333;margin-left:8px;">your first request</span>
+          </div>
+          <pre style="padding:18px 20px;margin:0;font-size:12px;line-height:1.8;font-family:'Courier New',monospace;color:#555;overflow-x:auto;white-space:pre;"><span style="color:#888;">curl</span> <span style="color:#9a9a9a;">https://</span><span style="color:#4ade80;">your-project</span><span style="color:#9a9a9a;">.forgedb.name.ng/prod/users</span> \\
+  -H <span style="color:#f0f0f0;">"X-Forge-Key: sk_live_yourkey"</span></pre>
+        </div>
+
+        <!-- CTA -->
+        <div style="margin:0 0 20px;">
+          <a href="https://forgedb.name.ng/app" style="display:inline-block;background:#ffffff;color:#000000;padding:13px 28px;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:0.06em;border-radius:5px;">OPEN DASHBOARD</a>
+        </div>
+
+        <!-- Limit warning -->
+        <div style="padding:14px 16px;background:#0f0808;border:1px solid #2a1010;border-left:2px solid #ef4444;border-radius:6px;">
+          <p style="font-size:12px;color:#ef4444;margin:0 0 4px;font-weight:700;">Free plan limit reminder</p>
+          <p style="font-size:12px;color:#5a3030;line-height:1.7;margin:0;">Exceeding your row or project limits will lock writes until you upgrade or clear data. <span style="color:#7a7a7a;">Upgrade anytime from your dashboard.</span></p>
+        </div>
+      `,
+    }),
+  });
+}
+
+// ── Pro Upgrade ───────────────────────────────────────────────────────────────
+async function sendProUpgradeEmail(env, { email, username, expiry }) {
+  await sendEmail(env, {
+    to: email,
+    subject: 'Firekid from ForgeDB — You are now on Pro',
+    html: emailBase({
+      badge: 'Pro Active',
+      badgeColor: '#f0f0f0',
+      badgeBg: '#111',
+      badgeBorder: '#2a2a2a',
+      accentBar: '#f0f0f0',
+      content: `
+        <p style="font-size:11px;color:#9a9a9a;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 10px;">Plan upgrade</p>
+        <p style="font-size:22px;font-weight:700;color:#ffffff;margin:0 0 28px;letter-spacing:-0.03em;line-height:1.2;">You are on Pro,<br>${username}.</p>
+
+        <div style="height:1px;background:#141414;margin:0 0 28px;"></div>
+
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 16px;">Your Pro plan is now active. Every limit is lifted — unlimited reads, writes, tables, webhooks, and full team collaboration.</p>
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 32px;">Your plan runs until <strong style="color:#f0f0f0;">${new Date(expiry).toDateString()}</strong>. You will receive a reminder before it expires so you never get caught off guard.</p>
+
+        <!-- Pro perks -->
+        <p style="font-size:10px;color:#3a3a3a;text-transform:uppercase;letter-spacing:0.08em;margin:0 0 12px;">What's unlocked</p>
+        <div style="margin:0 0 32px;">
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:13px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #f0f0f0;border-radius:6px;margin-bottom:8px;">
+            <span style="font-size:10px;font-weight:700;color:#f0f0f0;flex-shrink:0;margin-top:2px;">—</span>
+            <div style="font-size:12px;color:#9a9a9a;line-height:1.6;">Unlimited projects, tables, and rows across prod and test environments.</div>
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:13px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #555;border-radius:6px;margin-bottom:8px;">
+            <span style="font-size:10px;font-weight:700;color:#888;flex-shrink:0;margin-top:2px;">—</span>
+            <div style="font-size:12px;color:#9a9a9a;line-height:1.6;">Up to 4 team members per project with role-based access control.</div>
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:13px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #4ade80;border-radius:6px;margin-bottom:8px;">
+            <span style="font-size:10px;font-weight:700;color:#4ade80;flex-shrink:0;margin-top:2px;">—</span>
+            <div style="font-size:12px;color:#9a9a9a;line-height:1.6;">Full webhook support — push data changes to any endpoint in real time.</div>
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:13px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #ef4444;border-radius:6px;">
+            <span style="font-size:10px;font-weight:700;color:#ef4444;flex-shrink:0;margin-top:2px;">—</span>
+            <div style="font-size:12px;color:#9a9a9a;line-height:1.6;">Priority support. Any issues, reply to this email directly.</div>
+          </div>
+        </div>
+
+        <a href="https://forgedb.name.ng/app" style="display:inline-block;background:#ffffff;color:#000000;padding:13px 28px;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:0.06em;border-radius:5px;">OPEN DASHBOARD</a>
+      `,
+      footer: 'You received this because your ForgeDB plan was upgraded to Pro.',
+    }),
+  });
+}
+
+// ── Plan Expiry Alert ─────────────────────────────────────────────────────────
+async function sendPlanExpiryAlert(env, { email, username, planExpiry }) {
+  const daysLeft = Math.ceil((new Date(planExpiry) - Date.now()) / (1000 * 60 * 60 * 24));
+  await sendEmail(env, {
+    to: email,
+    subject: `Firekid from ForgeDB — Your Pro plan expires in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}`,
+    html: emailBase({
+      badge: `${daysLeft}d left`,
+      badgeColor: '#ef4444',
+      badgeBg: '#150a0a',
+      badgeBorder: '#2a1010',
+      accentBar: '#ef4444',
+      content: `
+        <p style="font-size:11px;color:#ef4444;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 10px;">Plan expiry notice</p>
+        <p style="font-size:22px;font-weight:700;color:#ffffff;margin:0 0 28px;letter-spacing:-0.03em;line-height:1.2;">Your Pro plan expires<br>in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}, ${username}.</p>
+
+        <div style="height:1px;background:#141414;margin:0 0 28px;"></div>
+
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 16px;">Your Pro plan expires on <strong style="color:#f0f0f0;">${new Date(planExpiry).toDateString()}</strong>. After that date, your account reverts to the free plan automatically.</p>
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 32px;">Projects, tables, and data are never deleted — but writes will be locked if you exceed free plan limits after the downgrade. Renew now to stay uninterrupted.</p>
+
+        <!-- What changes on downgrade -->
+        <div style="padding:16px;background:#0f0808;border:1px solid #2a1010;border-left:2px solid #ef4444;border-radius:6px;margin:0 0 32px;">
+          <p style="font-size:12px;color:#ef4444;margin:0 0 10px;font-weight:700;">What changes on downgrade</p>
+          <div style="font-size:12px;color:#5a3030;line-height:1.8;">
+            <div style="margin-bottom:4px;">— Projects capped at 3 (extras become read-only)</div>
+            <div style="margin-bottom:4px;">— Rows per table capped at 10,000</div>
+            <div style="margin-bottom:4px;">— Webhooks disabled</div>
+            <div>— Team members removed from projects</div>
+          </div>
+        </div>
+
+        <a href="https://forgedb.name.ng/app/upgrade" style="display:inline-block;background:#ffffff;color:#000000;padding:13px 28px;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:0.06em;border-radius:5px;">RENEW PRO PLAN</a>
+      `,
+      footer: 'You received this because your ForgeDB Pro plan is expiring soon.',
+    }),
+  });
+}
+
+// ── Team Invite ───────────────────────────────────────────────────────────────
+async function sendInviteEmail(env, { email, inviterUsername, projectName, role, inviteLink }) {
+  await sendEmail(env, {
+    to: email,
+    subject: `Firekid from ForgeDB — ${inviterUsername} invited you to ${projectName}`,
+    html: emailBase({
+      badge: 'Team Invite',
+      badgeColor: '#9a9a9a',
+      badgeBg: '#0d0d0d',
+      badgeBorder: '#1e1e1e',
+      accentBar: '#555555',
+      content: `
+        <p style="font-size:11px;color:#9a9a9a;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 10px;">You have been invited</p>
+        <p style="font-size:22px;font-weight:700;color:#ffffff;margin:0 0 28px;letter-spacing:-0.03em;line-height:1.2;">Join <span style="color:#f0f0f0;">${projectName}</span><br>on ForgeDB.</p>
+
+        <div style="height:1px;background:#141414;margin:0 0 28px;"></div>
+
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 16px;"><strong style="color:#f0f0f0;">${inviterUsername}</strong> has invited you to collaborate on the project <strong style="color:#f0f0f0;">${projectName}</strong>. You will join as a <strong style="color:#f0f0f0;">${role}</strong>.</p>
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 32px;">Click the button below to accept. This invite link expires in 48 hours and can only be used once. If you were not expecting this, you can safely ignore this email.</p>
+
+        <!-- Role info -->
+        <div style="margin:0 0 32px;">
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #f0f0f0;border-radius:6px;margin-bottom:8px;">
+            <span style="font-size:10px;font-weight:700;color:#f0f0f0;flex-shrink:0;margin-top:2px;text-transform:uppercase;">Role</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:#f0f0f0;margin-bottom:3px;text-transform:capitalize;">${role}</div>
+              <div style="font-size:12px;color:#555;line-height:1.6;">${role === 'admin' ? 'Full access — manage tables, keys, members, and settings.' : role === 'editor' ? 'Read and write access to tables and rows. Cannot manage members or billing.' : 'Read-only access to tables and rows.'}</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:12px;padding:14px 16px;background:#0a0a0a;border:1px solid #141414;border-left:2px solid #ef4444;border-radius:6px;">
+            <span style="font-size:10px;font-weight:700;color:#ef4444;flex-shrink:0;margin-top:2px;text-transform:uppercase;">Expiry</span>
+            <div style="font-size:12px;color:#555;line-height:1.6;margin-top:2px;">This invite expires in 48 hours. After that the link becomes invalid and ${inviterUsername} will need to resend it.</div>
+          </div>
+        </div>
+
+        <a href="${inviteLink}" style="display:inline-block;background:#ffffff;color:#000000;padding:13px 28px;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:0.06em;border-radius:5px;">ACCEPT INVITE</a>
+      `,
+      footer: `You received this because ${inviterUsername} invited you to a ForgeDB project. If you were not expecting this, ignore it.`,
+    }),
+  });
+}
+
+// ── Usage Alert ───────────────────────────────────────────────────────────────
+async function sendUsageAlertEmail(env, { email, username, metric, percent }) {
+  const isCritical = percent >= 90;
+  await sendEmail(env, {
+    to: email,
+    subject: `Firekid from ForgeDB — You have used ${percent}% of your ${metric} limit`,
+    html: emailBase({
+      badge: isCritical ? 'Critical' : 'Usage Warning',
+      badgeColor: '#ef4444',
+      badgeBg: '#150a0a',
+      badgeBorder: '#2a1010',
+      accentBar: '#ef4444',
+      content: `
+        <p style="font-size:11px;color:#ef4444;text-transform:uppercase;letter-spacing:0.1em;margin:0 0 10px;">${isCritical ? 'Critical usage' : 'Usage warning'}</p>
+        <p style="font-size:22px;font-weight:700;color:#ffffff;margin:0 0 28px;letter-spacing:-0.03em;line-height:1.2;">You have used<br><span style="color:#ef4444;">${percent}%</span> of your ${metric} limit.</p>
+
+        <div style="height:1px;background:#141414;margin:0 0 28px;"></div>
+
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 16px;">Hey <strong style="color:#f0f0f0;">${username}</strong>, your account has consumed <strong style="color:#ef4444;">${percent}%</strong> of its monthly <strong style="color:#f0f0f0;">${metric}</strong> allowance.</p>
+        <p style="font-size:14px;color:#9a9a9a;line-height:1.8;margin:0 0 32px;">${isCritical ? 'At 100% your writes will be locked until the next billing cycle or until you upgrade. Act now to avoid downtime.' : 'When you hit 100% writes will stop. Upgrade to Pro for unlimited usage with no interruptions.'}</p>
+
+        <!-- Usage bar -->
+        <div style="margin:0 0 32px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+            <span style="font-size:11px;color:#3a3a3a;text-transform:uppercase;letter-spacing:0.06em;">${metric}</span>
+            <span style="font-size:11px;color:#ef4444;font-weight:700;">${percent}% used</span>
+          </div>
+          <div style="height:6px;background:#141414;border-radius:3px;overflow:hidden;">
+            <div style="height:100%;width:${percent}%;background:${percent >= 90 ? '#ef4444' : '#888'};border-radius:3px;"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:6px;">
+            <span style="font-size:10px;color:#2a2a2a;">0</span>
+            <span style="font-size:10px;color:#2a2a2a;">Free plan limit</span>
+          </div>
+        </div>
+
+        <!-- What happens at 100% -->
+        <div style="padding:14px 16px;background:#0f0808;border:1px solid #2a1010;border-left:2px solid #ef4444;border-radius:6px;margin:0 0 32px;">
+          <p style="font-size:12px;color:#ef4444;margin:0 0 6px;font-weight:700;">What happens at 100%</p>
+          <p style="font-size:12px;color:#5a3030;line-height:1.7;margin:0;">All write operations are rejected until the monthly limit resets or you upgrade. Reads remain available. No data is deleted.</p>
+        </div>
+
+        <a href="https://forgedb.name.ng/app/upgrade" style="display:inline-block;background:#ffffff;color:#000000;padding:13px 28px;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:0.06em;border-radius:5px;">UPGRADE TO PRO</a>
+      `,
+      footer: `You received this because your ForgeDB account reached ${percent}% of its ${metric} limit.`,
+    }),
+  });
+}
+
+// ─── Admin HTML ───────────────────────────────────────────────────────────────
+
+function adminLoginHTML(errorMsg = '') {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>ForgeDB Admin</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#080808;color:#e8e8e8;font-family:monospace;min-height:100vh;display:flex;align-items:center;justify-content:center}.box{width:100%;max-width:360px;padding:40px;border:1px solid #1a1a1a;background:#0d0d0d}h1{font-size:18px;margin-bottom:32px}h1 span{color:#f97316}label{display:block;font-size:11px;color:#555;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px}input{width:100%;background:#080808;border:1px solid #1a1a1a;color:#e8e8e8;padding:10px 14px;font-family:monospace;font-size:13px;outline:none;margin-bottom:20px;transition:border-color .2s}input:focus{border-color:#f97316}button{width:100%;background:#f97316;color:#000;border:none;padding:12px;font-family:monospace;font-size:12px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;cursor:pointer}.error{background:#1a0a0a;border:1px solid #3a1a1a;color:#f87171;padding:10px 14px;font-size:12px;margin-bottom:20px}</style></head>
+<body><div class="box"><h1>Forge<span>DB</span> Admin</h1>${errorMsg ? `<div class="error">${errorMsg}</div>` : ''}
+<form method="POST" action="/admin/firekid/login"><label>Username</label><input type="text" name="username" required /><label>Password</label><input type="password" name="password" required /><button type="submit">Sign in</button></form></div></body></html>`;
+}
+
+function cliAuthHTML(sessionCode) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ForgeDB CLI Auth</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#080808;color:#e8e8e8;font-family:monospace;min-height:100vh;display:flex;align-items:center;justify-content:center}.box{width:100%;max-width:380px;padding:40px;border:1px solid #1a1a1a;background:#0d0d0d}h1{font-size:18px;margin-bottom:8px}h1 span{color:#f97316}.sub{font-size:12px;color:#555;margin-bottom:32px;line-height:1.6}.session{background:#080808;border:1px solid #1a1a1a;padding:10px 14px;font-size:11px;color:#444;margin-bottom:24px;word-break:break-all}label{display:block;font-size:11px;color:#555;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px}input{width:100%;background:#080808;border:1px solid #1a1a1a;color:#e8e8e8;padding:10px 14px;font-family:monospace;font-size:13px;outline:none;margin-bottom:20px;transition:border-color .2s}input:focus{border-color:#f97316}button{width:100%;background:#f97316;color:#000;border:none;padding:12px;font-family:monospace;font-size:12px;font-weight:500;cursor:pointer}</style></head>
+<body><div class="box"><h1>Forge<span>DB</span></h1><div class="sub">Sign in to authorize your terminal session. Expires in 2 minutes.</div>
+<div class="session">Session: ${sessionCode}</div>
+<form method="POST" action="/cli/auth/verify"><input type="hidden" name="session" value="${sessionCode}"><label>Email</label><input type="email" name="email" required><label>Password</label><input type="password" name="password" required><button type="submit">Authorize CLI</button></form></div></body></html>`;
+}
+
+// ─── Admin Auth ───────────────────────────────────────────────────────────────
+
+async function requireAdmin(request, env) {
+  const authHeader = request.headers.get('X-Admin-Token');
+  if (authHeader) {
+    const payload = await verifyJWT(authHeader, env.ADMIN_JWT_SECRET);
+    if (payload && payload.role === 'admin') return true;
+  }
+  const cookie = request.headers.get('Cookie') || '';
+  const match = cookie.match(/forge_admin=([^;]+)/);
+  if (!match) return false;
+  const payload = await verifyJWT(match[1], env.ADMIN_JWT_SECRET);
+  return !!(payload && payload.role === 'admin');
+}
+
+async function verifyAdmin(request, env) {
+  const token = getCookie(request, 'forge_admin');
+  if (!token) return null;
+  const payload = await verifyJWT(token, env.ADMIN_JWT_SECRET);
+  return payload?.role === 'admin' ? payload : null;
+}
+
+// ─── Paystack ─────────────────────────────────────────────────────────────────
+
+const PAYSTACK_BASE = 'https://api.paystack.co';
+const PLANS = {
+  monthly: { amount: 350000,  label: 'Pro Monthly', months: 1  },
+  annual:  { amount: 3600000, label: 'Pro Annual',  months: 12 },
+};
+
+async function hmacSha512Hex(secret, data) {
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-512' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function verifyPaystackSig(rawBody, signature, secret) {
+  if (!signature || !secret) return false;
+  const expected = await hmacSha512Hex(secret, rawBody);
+  if (expected.length !== signature.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
+  return diff === 0;
+}
+
+// ─── Plan Limits ──────────────────────────────────────────────────────────────
+
+function getPlanLimits(user) {
+  const isPro = user.plan === 'pro';
+  const extraProjects = user.extraProjects || 0;
+  const extraReads    = user.extraReads    || 0;
+  return {
+    reads:     isPro ? null   : 10000 + extraReads,
+    writes:    isPro ? null   : 1000,
+    storage:   isPro ? null   : 50 * 1024 * 1024,
+    databases: isPro ? null   : 2,
+    tables:    isPro ? null   : 10,
+    apiKeys:   isPro ? null   : 3,
+    projects:  isPro ? null   : 1 + extraProjects,
+    members:   isPro ? true   : false,
+    webhooks:  isPro ? null   : 2,
+  };
+}
+
+// ─── Route Handlers ───────────────────────────────────────────────────────────
+
+// Health — no vendor details exposed
+async function handleHealth(env) {
+  let ok = false;
+  try { await env.DB.prepare('SELECT 1').first(); ok = true; } catch {}
+  return jsonResp({ status: ok ? 'operational' : 'degraded', version: '3.0.0', timestamp: new Date().toISOString() });
+}
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+async function handleRegister(request, env, ctx) {
+  const { username, email, password, referralCode } = await request.json().catch(() => ({}));
+  if (!username || !email || !password) return errResp('username, email and password are required', 'MISSING_FIELDS');
+  if (password.length < 8) return errResp('Password must be at least 8 characters', 'WEAK_PASSWORD');
+  if (!/^[a-zA-Z0-9_-]{2,24}$/.test(username)) return errResp('Invalid username (2-24 chars, a-z/0-9/_/-)', 'INVALID_USERNAME');
+
+  // Validate referral code
+  let referrer = null;
+  if (referralCode) {
+    referrer = await env.DB.prepare('SELECT id FROM users WHERE referral_code = ?').bind(referralCode.toUpperCase()).first();
+    if (!referrer) return errResp('Invalid referral code', 'INVALID_REFERRAL');
+  }
+
+  try {
+    const user  = await dbCreateUser(env.DB, { username, email, password, referralCode: referralCode?.toUpperCase() });
+    const token = await issueUserToken(safeUser(user), env.JWT_SECRET);
+
+    // Track referral
+    if (referrer) {
+      const now = new Date().toISOString();
+      await env.DB.prepare(
+        'INSERT INTO referrals (id,referrer_id,referred_id,verified,rewarded,created_at) VALUES (?,?,?,0,0,?)'
+      ).bind(randomHex(8), referrer.id, user.id, now).run();
+    }
+
+    // Welcome email — waitUntil so CF doesn't kill it before Resend responds
+    ctx.waitUntil(sendWelcomeEmail(env, { email: user.email, username: user.username }).catch(() => {}));
+    writeAudit(env, user.id, null, 'user.register', { username, email }, request);
+
+    return jsonResp({ token, user: normalizeUser(user) }, 201);
+  } catch (e) {
+    if (e.message.includes('Email') || e.message.includes('Username')) return errResp(e.message, 'CONFLICT', 409);
+    throw e;
+  }
+}
+
+async function handleLogin(request, env) {
+  const { email, password } = await request.json().catch(() => ({}));
+  if (!email || !password) return errResp('Email and password required', 'MISSING_FIELDS');
+  const user = await dbGetUserByEmail(env.DB, email);
+  if (!user || !user.password_hash) return errResp('Invalid credentials', 'INVALID_CREDENTIALS', 401);
+  const ok = await checkPassword(password, user.password_hash);
+  if (!ok) return errResp('Invalid credentials', 'INVALID_CREDENTIALS', 401);
+  const token = await issueUserToken(safeUser(user), env.JWT_SECRET);
+  return jsonResp({ token, user: normalizeUser(user) });
+}
+
+async function handleMe(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  return jsonResp({ user });
+}
+
+async function handleUpdateMe(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const updates = await request.json().catch(() => ({}));
+  const allowed = ['username', 'email', 'avatar'];
+  const sets = []; const vals = [];
+  for (const key of allowed) {
+    if (updates[key] !== undefined) { sets.push(`${key} = ?`); vals.push(key === 'email' ? updates[key].toLowerCase() : updates[key]); }
+  }
+  if (sets.length > 0) {
+    vals.push(user.id);
+    await env.DB.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).bind(...vals).run();
+  }
+  return jsonResp({ user: normalizeUser(await dbGetUser(env.DB, user.id)) });
+}
+
+async function handleChangePassword(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { currentPassword, newPassword } = await request.json().catch(() => ({}));
+  if (!currentPassword || !newPassword) return errResp('currentPassword and newPassword required', 'MISSING_FIELDS');
+  if (newPassword.length < 8) return errResp('Password must be at least 8 characters', 'WEAK_PASSWORD');
+  const fullUser = await dbGetUser(env.DB, user.id);
+  if (!fullUser.password_hash) return errResp('OAuth account — no password set', 'NO_PASSWORD');
+  if (!await checkPassword(currentPassword, fullUser.password_hash)) return errResp('Current password is incorrect', 'WRONG_PASSWORD', 401);
+  const { hash } = await hashPassword(newPassword);
+  await env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(hash, user.id).run();
+  writeAudit(env, user.id, null, 'user.change_password', null, request);
+  return jsonResp({ success: true });
+}
+
+async function handleDeleteMe(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(user.id).run();
+  return jsonResp({ success: true });
+}
+
+async function handleGitHubOAuth(request, env) {
+  const url = new URL(request.url);
+  const redirectTo = url.searchParams.get('redirect') || '/app';
+  const ref = url.searchParams.get('ref') || null;
+  const state = btoa(JSON.stringify({ redirect: redirectTo, ref })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  const params = new URLSearchParams({ client_id: env.GITHUB_CLIENT_ID, redirect_uri: `${API_URL}/auth/github/callback`, scope: 'read:user user:email', state });
+  return redirectResp(`https://github.com/login/oauth/authorize?${params}`);
+}
+
+async function handleGitHubCallback(request, env, ctx) {
+  const url = new URL(request.url);
+  const code  = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  if (!code) return redirectResp(`${FRONTEND_URL}/app/login?error=oauth_cancelled`);
+  let redirectTo = '/app';
+  let ref = null;
+  try { const s = JSON.parse(atob((state || '').replace(/-/g, '+').replace(/_/g, '/'))); redirectTo = s.redirect || '/app'; ref = s.ref || null; } catch {}
+  try {
+    const tokenRes = await oauthPost('https://github.com/login/oauth/access_token', {
+      client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET,
+      code, redirect_uri: `${API_URL}/auth/github/callback`,
+    });
+    if (!tokenRes.access_token) return redirectResp(`${FRONTEND_URL}/app/login?error=oauth_failed`);
+    const [profile, emails] = await Promise.all([
+      oauthGet('https://api.github.com/user',        { Authorization: `token ${tokenRes.access_token}` }),
+      oauthGet('https://api.github.com/user/emails', { Authorization: `token ${tokenRes.access_token}` }),
+    ]);
+    const primaryEmail = (Array.isArray(emails) && emails.find(e => e.primary)?.email) || profile.email;
+    if (!primaryEmail) return redirectResp(`${FRONTEND_URL}/app/login?error=no_email`);
+    let user = await dbGetUserByProvider(env.DB, 'github', profile.id);
+    if (!user) {
+      user = await dbGetUserByEmail(env.DB, primaryEmail);
+      if (!user) {
+        const username = await resolveUsername(env.DB, profile.login);
+        user = await dbCreateUser(env.DB, { username, email: primaryEmail, provider: 'github', providerId: profile.id, avatar: profile.avatar_url, referralCode: ref?.toUpperCase() || undefined });
+        ctx.waitUntil(sendWelcomeEmail(env, { email: primaryEmail, username }).catch(() => {}));
+      } else {
+        await env.DB.prepare('UPDATE users SET provider_id=?,avatar=COALESCE(avatar,?) WHERE id=?').bind(String(profile.id), profile.avatar_url, user.id).run();
+        user = await dbGetUser(env.DB, user.id);
+      }
+    }
+    const token = await issueUserToken(safeUser(user), env.JWT_SECRET);
+    return redirectResp(`${FRONTEND_URL}/app/login?token=${token}&redirect=${encodeURIComponent(redirectTo)}`);
+  } catch (e) {
+    console.error('[auth] GitHub callback error:', e.message);
+    return redirectResp(`${FRONTEND_URL}/app/login?error=oauth_error`);
+  }
+}
+
+async function handleGoogleOAuth(request, env) {
+  const url = new URL(request.url);
+  const redirectTo = url.searchParams.get('redirect') || '/app';
+  const ref = url.searchParams.get('ref') || null;
+  const state = btoa(JSON.stringify({ redirect: redirectTo, ref })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  const params = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: `${API_URL}/auth/google/callback`, response_type: 'code', scope: 'openid email profile', state, access_type: 'online', prompt: 'select_account' });
+  return redirectResp(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+}
+
+async function handleGoogleCallback(request, env, ctx) {
+  const url = new URL(request.url);
+  const code  = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  if (!code) return redirectResp(`${FRONTEND_URL}/app/login?error=oauth_cancelled`);
+  let redirectTo = '/app';
+  let ref = null;
+  try { const s = JSON.parse(atob((state || '').replace(/-/g, '+').replace(/_/g, '/'))); redirectTo = s.redirect || '/app'; ref = s.ref || null; } catch {}
+  try {
+    const tokenRes = await oauthPost('https://oauth2.googleapis.com/token', {
+      code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: `${API_URL}/auth/google/callback`, grant_type: 'authorization_code',
+    });
+    if (!tokenRes.access_token) return redirectResp(`${FRONTEND_URL}/app/login?error=oauth_failed`);
+    const profile = await oauthGet('https://www.googleapis.com/oauth2/v2/userinfo', { Authorization: `Bearer ${tokenRes.access_token}` });
+    if (!profile.email) return redirectResp(`${FRONTEND_URL}/app/login?error=no_email`);
+    let user = await dbGetUserByProvider(env.DB, 'google', profile.id);
+    if (!user) {
+      user = await dbGetUserByEmail(env.DB, profile.email);
+      if (!user) {
+        const base = profile.name?.replace(/\s+/g, '').toLowerCase() || profile.email.split('@')[0];
+        const username = await resolveUsername(env.DB, base);
+        user = await dbCreateUser(env.DB, { username, email: profile.email, provider: 'google', providerId: profile.id, avatar: profile.picture, referralCode: ref?.toUpperCase() || undefined });
+        ctx.waitUntil(sendWelcomeEmail(env, { email: profile.email, username }).catch(() => {}));
+      } else {
+        await env.DB.prepare('UPDATE users SET provider_id=?,avatar=COALESCE(avatar,?) WHERE id=?').bind(String(profile.id), profile.picture, user.id).run();
+        user = await dbGetUser(env.DB, user.id);
+      }
+    }
+    const token = await issueUserToken(safeUser(user), env.JWT_SECRET);
+    return redirectResp(`${FRONTEND_URL}/app/login?token=${token}&redirect=${encodeURIComponent(redirectTo)}`);
+  } catch (e) {
+    console.error('[auth] Google callback error:', e.message);
+    return redirectResp(`${FRONTEND_URL}/app/login?error=oauth_error`);
+  }
+}
+
+// CLI Tokens
+async function handleCliTokenList(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { results } = await env.DB.prepare('SELECT id,prefix,created_at FROM cli_tokens WHERE user_id=?').bind(user.id).all();
+  return jsonResp(results.map(normalizeCliToken));
+}
+
+async function handleCliTokenCreate(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const raw = `ct_${randomHex(24)}`;
+  const hash = await sha256(raw);
+  const id = randomHex(8);
+  const prefix = raw.slice(0, 10) + '...';
+  const now = new Date().toISOString();
+  await env.DB.prepare('INSERT INTO cli_tokens (hash,id,user_id,prefix,created_at) VALUES (?,?,?,?,?)').bind(hash, id, user.id, prefix, now).run();
+  return jsonResp({ id, token: raw, prefix, created_at: now }, 201);
+}
+
+async function handleCliTokenDelete(request, env, tokenId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const t = await env.DB.prepare('SELECT id FROM cli_tokens WHERE id=? AND user_id=?').bind(tokenId, user.id).first();
+  if (!t) return errResp('Token not found', 'NOT_FOUND', 404);
+  await env.DB.prepare('DELETE FROM cli_tokens WHERE id=?').bind(tokenId).run();
+  return jsonResp({ success: true });
+}
+
+async function handleCliAuthPage(request) {
+  const session = new URL(request.url).searchParams.get('session');
+  if (!session || !/^[a-z0-9]{32}$/.test(session)) return new Response('Invalid session', { status: 400 });
+  return htmlResp(cliAuthHTML(session));
+}
+
+async function handleCliAuthVerify(request, env) {
+  const formData = await request.formData();
+  const session  = formData.get('session');
+  const email    = formData.get('email');
+  const password = formData.get('password');
+  if (!session || !email || !password) return htmlResp(cliAuthHTML(session || ''), 400);
+  const user = await dbGetUserByEmail(env.DB, email);
+  if (!user || !user.password_hash || !await checkPassword(password, user.password_hash)) {
+    return htmlResp(cliAuthHTML(session), 401);
+  }
+  await env.KV.put(`cli:session:${session}`, JSON.stringify({ userId: user.id }), { expirationTtl: 300 });
+  return htmlResp('<html><body style="background:#080808;color:#22c55e;font-family:monospace;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0"><p>&#10003; Authorized. You can close this tab.</p></body></html>');
+}
+
+async function handleCliSessionPoll(request, env) {
+  const session = new URL(request.url).searchParams.get('session');
+  if (!session) return errResp('session required', 'MISSING_SESSION');
+  const data = await env.KV.get(`cli:session:${session}`);
+  if (!data) return jsonResp({ ready: false });
+  await env.KV.delete(`cli:session:${session}`);
+  const { userId } = JSON.parse(data);
+  const user = await dbGetUser(env.DB, userId);
+  if (!user) return jsonResp({ ready: false });
+  const token = await issueUserToken(safeUser(user), env.JWT_SECRET);
+  return jsonResp({ ready: true, token });
+}
+
+// ─── Projects ─────────────────────────────────────────────────────────────────
+
+async function handleProjectsList(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  // Own projects
+  const { results: owned } = await env.DB.prepare('SELECT * FROM projects WHERE user_id=? ORDER BY created_at ASC').bind(user.id).all();
+  // Projects shared with user as member
+  const { results: memberships } = await env.DB.prepare(
+    'SELECT p.*, pm.role AS member_role FROM projects p JOIN project_members pm ON p.id=pm.project_id WHERE pm.user_id=? ORDER BY p.created_at ASC'
+  ).bind(user.id).all();
+  const ownedIds = new Set(owned.map(p => p.id));
+  const shared = memberships.filter(p => !ownedIds.has(p.id));
+  const all = [
+    ...owned.map(p => ({ ...normalizeProject(p), databaseCount: 2, role: 'owner' })),
+    ...shared.map(p => ({ ...normalizeProject(p), databaseCount: 2, role: p.member_role })),
+  ];
+  return jsonResp(all);
+}
+
+async function handleProjectCreate(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+
+  const { name, password } = await request.json().catch(() => ({}));
+  if (!name?.trim()) return errResp('Project name is required', 'MISSING_NAME');
+  if (!password || password.length < 8) return errResp('Database password must be at least 8 characters', 'MISSING_PASSWORD');
+
+  // Enforce project limit
+  const limits = getPlanLimits(user);
+  if (limits.projects !== null) {
+    const { results: existing } = await env.DB.prepare('SELECT id FROM projects WHERE user_id=?').bind(user.id).all();
+    if (existing.length >= limits.projects) return errResp(`Free plan allows ${limits.projects} project(s). Upgrade to create more.`, 'LIMIT_REACHED', 403);
+  }
+
+  const dupCheck = await env.DB.prepare('SELECT id FROM projects WHERE user_id=? AND LOWER(name)=LOWER(?)').bind(user.id, name.trim()).first();
+  if (dupCheck) return errResp('Project name already in use', 'DUPLICATE_NAME', 409);
+
+  const id  = `proj_${randomHex(8)}`;
+  const now = new Date().toISOString();
+  const { hash } = await hashPassword(password);
+
+  await env.DB.batch([
+    env.DB.prepare('INSERT INTO projects (id,name,user_id,created_at) VALUES (?,?,?,?)').bind(id, name.trim(), user.id, now),
+    env.DB.prepare('INSERT INTO db_passwords (project_id,user_id,hash,updated_at) VALUES (?,?,?,?)').bind(id, user.id, hash, now),
+  ]);
+
+  writeAudit(env, user.id, id, 'project.create', { name: name.trim() }, request);
+  return jsonResp({ id, name: name.trim(), databaseCount: 2, createdAt: now }, 201);
+}
+
+async function handleProjectRename(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT * FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Project not found', 'NOT_FOUND', 404);
+  const { name } = await request.json().catch(() => ({}));
+  if (!name?.trim()) return errResp('Name is required', 'MISSING_NAME');
+  await env.DB.prepare('UPDATE projects SET name=? WHERE id=?').bind(name.trim(), projectId).run();
+  writeAudit(env, user.id, projectId, 'project.rename', { from: project.name, to: name.trim() }, request);
+  return jsonResp({ id: projectId, name: name.trim() });
+}
+
+async function handleProjectDelete(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Project not found', 'NOT_FOUND', 404);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM projects WHERE id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM table_schemas WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM table_sequences WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM rows WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM api_keys WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM webhooks WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM request_logs WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM saved_queries WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM sql_query_history WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM project_members WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM project_invites WHERE project_id=?').bind(projectId),
+    env.DB.prepare('DELETE FROM db_passwords WHERE project_id=?').bind(projectId),
+  ]);
+  writeAudit(env, user.id, projectId, 'project.delete', null, request);
+  return jsonResp({ success: true });
+}
+
+async function handleProjectDatabases(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT * FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Project not found', 'NOT_FOUND', 404);
+  const now = new Date().toISOString();
+  return jsonResp(['prod', 'test'].map(e => ({
+    id: `${projectId}_${e}`, name: e === 'prod' ? 'Production' : 'Test', env: e, projectId,
+    tableCount: 0, rowCount: 0, storageBytes: 0,
+    ...(e === 'test' ? { wipesAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() } : {}),
+    createdAt: project.created_at, updatedAt: now,
+  })));
+}
+
+// ─── DB Password ──────────────────────────────────────────────────────────────
+
+async function handleDbPasswordChange(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Project not found', 'NOT_FOUND', 404);
+  const month = new Date().toISOString().slice(0, 7);
+  const { count } = await env.DB.prepare('SELECT COUNT(*) as count FROM password_change_log WHERE project_id=? AND month=?').bind(projectId, month).first();
+  if (count >= 3) return errResp(`Password can only be changed 3 times per month (${3 - count} remaining)`, 'RATE_LIMITED', 429);
+  const { password } = await request.json().catch(() => ({}));
+  if (!password || password.length < 8) return errResp('Password must be at least 8 characters', 'WEAK_PASSWORD');
+  const { hash } = await hashPassword(password);
+  const now = new Date().toISOString();
+  const existing = await env.DB.prepare('SELECT project_id FROM db_passwords WHERE project_id=?').bind(projectId).first();
+  if (existing) {
+    await env.DB.prepare('UPDATE db_passwords SET hash=?,updated_at=? WHERE project_id=?').bind(hash, now, projectId).run();
+  } else {
+    await env.DB.prepare('INSERT INTO db_passwords (project_id,user_id,hash,updated_at) VALUES (?,?,?,?)').bind(projectId, user.id, hash, now).run();
+  }
+  await env.DB.prepare('INSERT INTO password_change_log (project_id,month,changed_at) VALUES (?,?,?)').bind(projectId, month, now).run();
+  writeAudit(env, user.id, projectId, 'project.password_change', null, request);
+  return jsonResp({ success: true, changesThisMonth: count + 1, changesRemaining: 3 - (count + 1) });
+}
+
+async function handleDbPasswordStatus(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Project not found', 'NOT_FOUND', 404);
+  const month = new Date().toISOString().slice(0, 7);
+  const { count } = await env.DB.prepare('SELECT COUNT(*) as count FROM password_change_log WHERE project_id=? AND month=?').bind(projectId, month).first();
+  const record = await env.DB.prepare('SELECT updated_at FROM db_passwords WHERE project_id=?').bind(projectId).first();
+  return jsonResp({ hasPassword: !!record, changesThisMonth: count, changesRemaining: 3 - count, lastChanged: record?.updated_at || null });
+}
+
+// ─── API Keys ─────────────────────────────────────────────────────────────────
+
+async function handleKeysList(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { results } = await env.DB.prepare(
+    'SELECT id,name,prefix,type,permissions,env,project_id,last_used,total_calls,created_at,expires_at FROM api_keys WHERE user_id=? AND project_id=? AND revoked=0'
+  ).bind(user.id, projectId).all();
+  return jsonResp(results.map(normalizeKey));
+}
+
+async function handleKeyCreate(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const limits = getPlanLimits(user);
+  if (limits.apiKeys !== null) {
+    const { results: existing } = await env.DB.prepare('SELECT id FROM api_keys WHERE user_id=? AND project_id=? AND revoked=0').bind(user.id, projectId).all();
+    if (existing.length >= limits.apiKeys) return errResp(`Free plan allows ${limits.apiKeys} API keys per project`, 'LIMIT_REACHED', 403);
+  }
+  const { name, type = 'prod', permissions = 'read_write', expiresAt } = await request.json().catch(() => ({}));
+  if (!name) return errResp('Key name is required', 'MISSING_NAME');
+  const keyEnv  = type === 'test' ? 'test' : 'prod';
+  const keyType = permissions === 'read' ? 'forge' : 'service';
+  const secret  = generateKey(keyEnv, keyType);
+  const hash    = await sha256(secret);
+  const id      = randomHex(8);
+  const prefix  = secret.slice(0, secret.lastIndexOf('_') + 5) + '...';
+  const now     = new Date().toISOString();
+  await env.DB.prepare(
+    'INSERT INTO api_keys (hash,id,name,prefix,type,permissions,key_type,env,user_id,project_id,last_used,total_calls,created_at,revoked,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,NULL,0,?,0,?)'
+  ).bind(hash, id, name, prefix, type, permissions, keyType, keyEnv, user.id, projectId, now, expiresAt || null).run();
+  writeAudit(env, user.id, projectId, 'key.create', { name, type, permissions }, request);
+  return jsonResp({ id, name, prefix, type, permissions, env: keyEnv, projectId, lastUsed: null, totalCalls: 0, createdAt: now, secret }, 201);
+}
+
+async function handleKeyDelete(request, env, projectId, keyId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const key = await env.DB.prepare('SELECT hash FROM api_keys WHERE id=? AND user_id=? AND project_id=?').bind(keyId, user.id, projectId).first();
+  if (!key) return errResp('Key not found', 'NOT_FOUND', 404);
+  await env.DB.prepare('UPDATE api_keys SET revoked=1 WHERE hash=?').bind(key.hash).run();
+  writeAudit(env, user.id, projectId, 'key.revoke', { keyId }, request);
+  return jsonResp({ success: true });
+}
+
+// ─── Tables ───────────────────────────────────────────────────────────────────
+
+async function handleTablesList(request, env, projectId, envName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { results } = await env.DB.prepare(
+    'SELECT ts.*,tseq.total_rows FROM table_schemas ts LEFT JOIN table_sequences tseq ON ts.user_id=tseq.user_id AND ts.project_id=tseq.project_id AND ts.env=tseq.env AND ts.table_name=tseq.table_name WHERE ts.user_id=? AND ts.project_id=? AND ts.env=?'
+  ).bind(user.id, projectId, envName).all();
+  return jsonResp(results.map(t => ({
+    name: t.table_name, dbId: `${projectId}_${envName}`,
+    columns: JSON.parse(t.columns_json || '[]'),
+    rowCount: t.total_rows || 0, storageBytes: 0,
+    createdAt: t.created_at, updatedAt: t.updated_at,
+  })));
+}
+
+async function handleTableCreate(request, env, projectId, envName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const limits = getPlanLimits(user);
+  if (limits.tables !== null) {
+    const { results: existing } = await env.DB.prepare('SELECT table_name FROM table_schemas WHERE user_id=? AND project_id=? AND env=?').bind(user.id, projectId, envName).all();
+    if (existing.length >= limits.tables) return errResp(`Free plan allows ${limits.tables} tables per database`, 'LIMIT_REACHED', 403);
+  }
+  const { name, columns = [] } = await request.json().catch(() => ({}));
+  if (!name || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) return errResp('Invalid table name (letters, numbers, underscores, must start with letter or _)', 'INVALID_NAME');
+  const existing = await env.DB.prepare('SELECT 1 FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, name).first();
+  if (existing) return errResp(`Table "${name}" already exists`, 'DUPLICATE_TABLE', 409);
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare('INSERT INTO table_schemas (user_id,project_id,env,table_name,columns_json,strict,created_at,updated_at) VALUES (?,?,?,?,?,0,?,?)').bind(user.id, projectId, envName, name, JSON.stringify(columns), now, now),
+    env.DB.prepare('INSERT OR IGNORE INTO table_sequences (user_id,project_id,env,table_name,last_id,total_rows) VALUES (?,?,?,?,0,0)').bind(user.id, projectId, envName, name),
+  ]);
+  writeAudit(env, user.id, projectId, 'table.create', { name, env: envName }, request);
+  return jsonResp({ name, dbId: `${projectId}_${envName}`, columns, rowCount: 0, storageBytes: 0, createdAt: now, updatedAt: now }, 201);
+}
+
+async function handleTableUpdate(request, env, projectId, envName, tableName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const schema = await env.DB.prepare('SELECT * FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).first();
+  if (!schema) return errResp('Table not found', 'NOT_FOUND', 404);
+  const { columns, rename } = await request.json().catch(() => ({}));
+  const now = new Date().toISOString();
+  let ops = [];
+  // Rename table
+  if (rename && rename !== tableName) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(rename)) return errResp('Invalid table name', 'INVALID_NAME');
+    const conflict = await env.DB.prepare('SELECT 1 FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, rename).first();
+    if (conflict) return errResp(`Table "${rename}" already exists`, 'DUPLICATE_TABLE', 409);
+    ops.push(
+      env.DB.prepare('UPDATE table_schemas SET table_name=?,updated_at=? WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(rename, now, user.id, projectId, envName, tableName),
+      env.DB.prepare('UPDATE table_sequences SET table_name=? WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(rename, user.id, projectId, envName, tableName),
+      env.DB.prepare('UPDATE rows SET table_name=? WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(rename, user.id, projectId, envName, tableName),
+    );
+    writeAudit(env, user.id, projectId, 'table.rename', { from: tableName, to: rename, env: envName }, request);
+  }
+  // Update columns
+  if (columns) {
+    if (ops.length === 0) {
+      await env.DB.prepare('UPDATE table_schemas SET columns_json=?,updated_at=? WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(JSON.stringify(columns), now, user.id, projectId, envName, rename || tableName).run();
+    } else {
+      ops.push(env.DB.prepare('UPDATE table_schemas SET columns_json=?,updated_at=? WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(JSON.stringify(columns), now, user.id, projectId, envName, rename || tableName));
+    }
+    writeAudit(env, user.id, projectId, 'table.update_schema', { table: rename || tableName, env: envName }, request);
+  }
+  if (ops.length > 0) await env.DB.batch(ops);
+  return jsonResp({ success: true });
+}
+
+async function handleTableDelete(request, env, projectId, envName, tableName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const schema = await env.DB.prepare('SELECT 1 FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).first();
+  if (!schema) return errResp('Table not found', 'NOT_FOUND', 404);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName),
+    env.DB.prepare('DELETE FROM table_sequences WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName),
+    env.DB.prepare('DELETE FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName),
+  ]);
+  writeAudit(env, user.id, projectId, 'table.delete', { name: tableName, env: envName }, request);
+  return jsonResp({ success: true });
+}
+
+async function handleTableExport(request, env, projectId, envName, tableName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const url = new URL(request.url);
+  const fmt = url.searchParams.get('format') || 'json';
+  const { results } = await env.DB.prepare(
+    'SELECT forge_id,data_json,created_at,updated_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? ORDER BY forge_id ASC'
+  ).bind(user.id, projectId, envName, tableName).all();
+  const rows = results.map(r => ({ id: r.forge_id, ...JSON.parse(r.data_json || '{}'), createdAt: r.created_at, updatedAt: r.updated_at }));
+  if (fmt === 'csv') {
+    if (rows.length === 0) return new Response('', { headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="${tableName}.csv"`, ...CORS } });
+    const headers = Object.keys(rows[0]);
+    const csv = [
+      headers.join(','),
+      ...rows.map(r => headers.map(h => {
+        const v = r[h];
+        if (v === null || v === undefined) return '';
+        const s = String(v);
+        return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+      }).join(','))
+    ].join('\n');
+    return new Response(csv, { headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="${tableName}.csv"`, ...CORS } });
+  }
+  return new Response(JSON.stringify({ table: tableName, exported_at: new Date().toISOString(), rows }, null, 2), {
+    headers: { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="${tableName}.json"`, ...CORS }
+  });
+}
+
+async function handleColumnAdd(request, env, projectId, envName, tableName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const column = await request.json().catch(() => ({}));
+  if (!column.name || !column.type) return errResp('Column name and type are required', 'MISSING_FIELDS');
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(column.name)) return errResp('Invalid column name', 'INVALID_NAME');
+  const row = await env.DB.prepare('SELECT * FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).first();
+  if (!row) return errResp('Table not found', 'NOT_FOUND', 404);
+  const columns = JSON.parse(row.columns_json || '[]');
+  if (columns.find(c => c.name === column.name)) return errResp(`Column "${column.name}" already exists`, 'DUPLICATE_COLUMN', 409);
+  columns.push(column);
+  await env.DB.prepare('UPDATE table_schemas SET columns_json=?,updated_at=? WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(JSON.stringify(columns), new Date().toISOString(), user.id, projectId, envName, tableName).run();
+  writeAudit(env, user.id, projectId, 'column.add', { table: tableName, column: column.name }, request);
+  return jsonResp(column, 201);
+}
+
+async function handleColumnDelete(request, env, projectId, envName, tableName, columnName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const row = await env.DB.prepare('SELECT * FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).first();
+  if (!row) return errResp('Table not found', 'NOT_FOUND', 404);
+  let columns = JSON.parse(row.columns_json || '[]');
+  const idx = columns.findIndex(c => c.name === columnName);
+  if (idx === -1) return errResp('Column not found', 'NOT_FOUND', 404);
+  columns.splice(idx, 1);
+  await env.DB.prepare('UPDATE table_schemas SET columns_json=?,updated_at=? WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(JSON.stringify(columns), new Date().toISOString(), user.id, projectId, envName, tableName).run();
+  writeAudit(env, user.id, projectId, 'column.delete', { table: tableName, column: columnName }, request);
+  return jsonResp({ success: true });
+}
+
+async function handleColumnUpdate(request, env, projectId, envName, tableName, columnName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const updates = await request.json().catch(() => ({}));
+  if (!updates || typeof updates !== 'object') return errResp('Invalid body', 'INVALID_BODY');
+  const row = await env.DB.prepare('SELECT * FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).first();
+  if (!row) return errResp('Table not found', 'NOT_FOUND', 404);
+  let columns = JSON.parse(row.columns_json || '[]');
+  const idx = columns.findIndex(c => c.name === columnName);
+  if (idx === -1) return errResp('Column not found', 'NOT_FOUND', 404);
+  // If renaming, check no conflict
+  if (updates.name && updates.name !== columnName) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(updates.name)) return errResp('Invalid column name', 'INVALID_NAME');
+    if (columns.find(c => c.name === updates.name)) return errResp(`Column "${updates.name}" already exists`, 'DUPLICATE_COLUMN', 409);
+    // Rename the key in every existing row
+    const { results: existingRows } = await env.DB.prepare(
+      'SELECT pk,data_json FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=?'
+    ).bind(user.id, projectId, envName, tableName).all();
+    if (existingRows.length > 0) {
+      const stmts = existingRows.map(r => {
+        const data = JSON.parse(r.data_json || '{}');
+        if (Object.prototype.hasOwnProperty.call(data, columnName)) {
+          data[updates.name] = data[columnName];
+          delete data[columnName];
+        }
+        return env.DB.prepare('UPDATE rows SET data_json=? WHERE pk=?').bind(JSON.stringify(data), r.pk);
+      });
+      // D1 batch limit is 100 — chunk if needed
+      for (let i = 0; i < stmts.length; i += 100) {
+        await env.DB.batch(stmts.slice(i, i + 100));
+      }
+    }
+  }
+  // Merge allowed fields
+  const allowed = ['name', 'type', 'required', 'unique', 'default', 'maxLength', 'enum'];
+  for (const key of allowed) {
+    if (key in updates) columns[idx][key] = updates[key];
+  }
+  await env.DB.prepare('UPDATE table_schemas SET columns_json=?,updated_at=? WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(JSON.stringify(columns), new Date().toISOString(), user.id, projectId, envName, tableName).run();
+  writeAudit(env, user.id, projectId, 'column.update', { table: tableName, column: columnName, updates }, request);
+  return jsonResp(columns[idx]);
+}
+
+// ─── DB Operations (API key auth) ─────────────────────────────────────────────
+
+async function handleDbSelect(request, env, project, dbEnv, table) {
+  const start = Date.now();
+  const auth = await requireDbPassword(request, env, project);
+  if (!auth) return errResp('Invalid or missing database key', 'MISSING_KEY', 401);
+  const { userId } = auth;
+  const url     = new URL(request.url);
+  const page    = Math.max(1, parseInt(url.searchParams.get('page')  || '1'));
+  const limit   = Math.min(100, parseInt(url.searchParams.get('limit') || '50'));
+  const search  = url.searchParams.get('search') || '';
+  const sort    = url.searchParams.get('sort') || 'id';
+  const order   = (url.searchParams.get('order') || 'asc').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+
+  // Fast path: no search, sorting by id — use SQL COUNT + LIMIT/OFFSET
+  if (!search && sort === 'id') {
+    const countRow = await env.DB.prepare(
+      'SELECT COUNT(*) AS cnt FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=?'
+    ).bind(userId, project, dbEnv, table).first();
+    const total      = countRow?.cnt || 0;
+    const totalPages = Math.ceil(total / limit) || 1;
+    const sqlOrder   = order === 'DESC' ? 'DESC' : 'ASC';
+    const { results } = await env.DB.prepare(
+      `SELECT forge_id,data_json,created_at,updated_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? ORDER BY forge_id ${sqlOrder} LIMIT ? OFFSET ?`
+    ).bind(userId, project, dbEnv, table, limit, (page - 1) * limit).all();
+    const rows = results.map(r => ({ id: r.forge_id, ...JSON.parse(r.data_json || '{}'), createdAt: r.created_at, updatedAt: r.updated_at }));
+    const duration = Date.now() - start;
+    writeRequestLog(env, userId, project, { table, operation: 'SELECT', statusCode: 200, duration, env: dbEnv }).catch(() => {});
+    trackUsage(env, userId, project, 'read').catch(() => {});
+    return jsonResp({ success: true, rows, total, page, limit, totalPages });
+  }
+
+  // Slow path: search or sort by non-id field — fetch all, filter/sort in JS, slice
+  const { results } = await env.DB.prepare(
+    'SELECT forge_id,data_json,created_at,updated_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? ORDER BY forge_id ASC'
+  ).bind(userId, project, dbEnv, table).all();
+
+  let rows = results.map(r => ({ id: r.forge_id, ...JSON.parse(r.data_json || '{}'), createdAt: r.created_at, updatedAt: r.updated_at }));
+
+  if (search) {
+    const q = search.toLowerCase();
+    rows = rows.filter(row => Object.values(row).some(v => v !== null && v !== undefined && String(v).toLowerCase().includes(q)));
+  }
+
+  rows.sort((a, b) => {
+    const av = a[sort]; const bv = b[sort];
+    if (av === undefined) return 1;
+    if (bv === undefined) return -1;
+    if (av < bv) return order === 'DESC' ? 1 : -1;
+    if (av > bv) return order === 'DESC' ? -1 : 1;
+    return 0;
+  });
+
+  const total      = rows.length;
+  const totalPages = Math.ceil(total / limit) || 1;
+  const sliced     = rows.slice((page - 1) * limit, page * limit);
+
+  const duration = Date.now() - start;
+  writeRequestLog(env, userId, project, { table, operation: 'SELECT', statusCode: 200, duration, env: dbEnv }).catch(() => {});
+  trackUsage(env, userId, project, 'read').catch(() => {});
+
+  return jsonResp({ success: true, rows: sliced, total, page, limit, totalPages });
+}
+async function handleDbGetById(request, env, project, dbEnv, table, id) {
+  const start = Date.now();
+  const auth = await requireDbPassword(request, env, project);
+  if (!auth) return errResp('Invalid or missing database key', 'MISSING_KEY', 401);
+  const { userId } = auth;
+  const row = await env.DB.prepare('SELECT forge_id,data_json,created_at,updated_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? AND forge_id=?').bind(userId, project, dbEnv, table, parseInt(id)).first();
+  if (!row) return errResp('Row not found', 'NOT_FOUND', 404);
+  writeRequestLog(env, userId, project, { table, operation: 'SELECT', statusCode: 200, duration: Date.now() - start, env: dbEnv }).catch(() => {});
+  trackUsage(env, userId, project, 'read').catch(() => {});
+  return jsonResp({ success: true, row: { id: row.forge_id, ...JSON.parse(row.data_json || '{}'), createdAt: row.created_at, updatedAt: row.updated_at } });
+}
+
+async function handleDbInsert(request, env, project, dbEnv, table) {
+  const start = Date.now();
+  const auth = await requireDbPassword(request, env, project);
+  if (!auth) return errResp('Invalid or missing database key', 'MISSING_KEY', 401);
+  const { userId } = auth;
+
+  let body = await request.json().catch(() => null);
+  const isBulk = Array.isArray(body);
+  const items = isBulk ? body : [body];
+
+  if (!items.length || !items[0] || typeof items[0] !== 'object') return errResp('Invalid JSON body', 'INVALID_BODY');
+
+  const schema = await env.DB.prepare('SELECT columns_json FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(userId, project, dbEnv, table).first();
+  const columns = schema ? JSON.parse(schema.columns_json || '[]') : [];
+
+  const inserted = [];
+  for (let data of items) {
+    if (columns.length > 0) {
+      // Coerce types
+      for (const col of columns) {
+        if (data[col.name] !== undefined && data[col.name] !== null) {
+          data[col.name] = coerceValue(data[col.name], col.type);
+        }
+      }
+      data = applyDefaults(data, columns);
+      const errors = validateRow(data, columns);
+      if (errors.length > 0) return errResp(`Validation failed: ${errors.join(', ')}`, 'VALIDATION_ERROR');
+      const uniqueErr = await enforceUnique(env.DB, userId, project, dbEnv, table, data, columns);
+      if (uniqueErr) return errResp(uniqueErr, 'UNIQUE_VIOLATION', 409);
+    }
+    const now = new Date().toISOString();
+    await env.DB.prepare('INSERT OR IGNORE INTO table_sequences (user_id,project_id,env,table_name,last_id,total_rows) VALUES (?,?,?,?,0,0)').bind(userId, project, dbEnv, table).run();
+    await env.DB.prepare('UPDATE table_sequences SET last_id=last_id+1,total_rows=total_rows+1 WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(userId, project, dbEnv, table).run();
+    const seq = await env.DB.prepare('SELECT last_id FROM table_sequences WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(userId, project, dbEnv, table).first();
+    const forgeId = seq.last_id;
+    await env.DB.prepare('INSERT INTO rows (forge_id,user_id,project_id,env,table_name,data_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').bind(forgeId, userId, project, dbEnv, table, JSON.stringify(data), now, now).run();
+    inserted.push({ id: forgeId, ...data, createdAt: now, updatedAt: now });
+  }
+
+  const duration = Date.now() - start;
+  writeRequestLog(env, userId, project, { table, operation: 'INSERT', statusCode: 201, duration, env: dbEnv }).catch(() => {});
+  trackUsage(env, userId, project, 'write').catch(() => {});
+
+  if (isBulk) return jsonResp({ success: true, rows: inserted, count: inserted.length }, 201);
+  return jsonResp({ success: true, row: inserted[0] }, 201);
+}
+
+async function handleDbUpdate(request, env, project, dbEnv, table, id) {
+  const start = Date.now();
+  const auth = await requireDbPassword(request, env, project);
+  if (!auth) return errResp('Invalid or missing database key', 'MISSING_KEY', 401);
+  const { userId } = auth;
+  let updates = await request.json().catch(() => null);
+  if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return errResp('Invalid JSON body', 'INVALID_BODY');
+  const existing = await env.DB.prepare('SELECT pk,forge_id,data_json,created_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? AND forge_id=?').bind(userId, project, dbEnv, table, parseInt(id)).first();
+  if (!existing) return errResp(`Row ${id} not found`, 'NOT_FOUND', 404);
+  const schema = await env.DB.prepare('SELECT columns_json FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(userId, project, dbEnv, table).first();
+  const columns = schema ? JSON.parse(schema.columns_json || '[]') : [];
+  if (columns.length > 0) {
+    for (const col of columns) {
+      if (updates[col.name] !== undefined && updates[col.name] !== null) {
+        updates[col.name] = coerceValue(updates[col.name], col.type);
+      }
+    }
+    const errors = validateRow({ ...JSON.parse(existing.data_json || '{}'), ...updates }, columns);
+    if (errors.length > 0) return errResp(`Validation failed: ${errors.join(', ')}`, 'VALIDATION_ERROR');
+    const uniqueErr = await enforceUnique(env.DB, userId, project, dbEnv, table, updates, columns, existing.forge_id);
+    if (uniqueErr) return errResp(uniqueErr, 'UNIQUE_VIOLATION', 409);
+  }
+  const now    = new Date().toISOString();
+  const merged = { ...JSON.parse(existing.data_json || '{}'), ...updates };
+  delete merged.id; delete merged.createdAt; delete merged.updatedAt;
+  // Snapshot the row before update
+  const preUpdate = { id: existing.forge_id, ...JSON.parse(existing.data_json || '{}'), createdAt: existing.created_at };
+  writeSnapshot(env, userId, project, dbEnv, table, 'UPDATE', [preUpdate]).catch(() => {});
+  await env.DB.prepare('UPDATE rows SET data_json=?,updated_at=? WHERE pk=?').bind(JSON.stringify(merged), now, existing.pk).run();
+  writeRequestLog(env, userId, project, { table, operation: 'UPDATE', statusCode: 200, duration: Date.now() - start, env: dbEnv }).catch(() => {});
+  trackUsage(env, userId, project, 'write').catch(() => {});
+  return jsonResp({ success: true, row: { id: existing.forge_id, ...merged, createdAt: existing.created_at, updatedAt: now } });
+}
+
+async function handleDbDelete(request, env, project, dbEnv, table, id) {
+  const start = Date.now();
+  const auth = await requireDbPassword(request, env, project);
+  if (!auth) return errResp('Invalid or missing database key', 'MISSING_KEY', 401);
+  const { userId } = auth;
+  const row = await env.DB.prepare('SELECT pk,forge_id,data_json,created_at,updated_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? AND forge_id=?').bind(userId, project, dbEnv, table, parseInt(id)).first();
+  if (!row) return errResp(`Row ${id} not found`, 'NOT_FOUND', 404);
+  // Snapshot before delete
+  writeSnapshot(env, userId, project, dbEnv, table, 'DELETE', [{ id: row.forge_id, ...JSON.parse(row.data_json || '{}'), createdAt: row.created_at, updatedAt: row.updated_at }]).catch(() => {});
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM rows WHERE pk=?').bind(row.pk),
+    env.DB.prepare('UPDATE table_sequences SET total_rows=MAX(0,total_rows-1) WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(userId, project, dbEnv, table),
+  ]);
+  writeRequestLog(env, userId, project, { table, operation: 'DELETE', statusCode: 200, duration: Date.now() - start, env: dbEnv }).catch(() => {});
+  trackUsage(env, userId, project, 'write').catch(() => {});
+  return jsonResp({ success: true, deleted: true, id: parseInt(id) });
+}
+
+async function handleDbBulkDelete(request, env, project, dbEnv, table) {
+  const auth = await requireDbPassword(request, env, project);
+  if (!auth) return errResp('Invalid or missing database key', 'MISSING_KEY', 401);
+  const { userId } = auth;
+  const { ids } = await request.json().catch(() => ({}));
+  if (!Array.isArray(ids) || ids.length === 0) return errResp('ids array is required', 'MISSING_IDS');
+  if (ids.length > 100) return errResp('Maximum 100 rows per bulk delete', 'TOO_MANY');
+
+  // Snapshot before delete
+  const snapshotRows = [];
+  for (const id of ids) {
+    const row = await env.DB.prepare('SELECT forge_id,data_json,created_at,updated_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? AND forge_id=?').bind(userId, project, dbEnv, table, parseInt(id)).first();
+    if (row) snapshotRows.push({ id: row.forge_id, ...JSON.parse(row.data_json || '{}'), createdAt: row.created_at, updatedAt: row.updated_at });
+  }
+  if (snapshotRows.length > 0) {
+    await writeSnapshot(env, userId, project, dbEnv, table, 'BULK_DELETE', snapshotRows);
+  }
+
+  let deleted = 0;
+  for (const id of ids) {
+    const row = await env.DB.prepare('SELECT pk FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? AND forge_id=?').bind(userId, project, dbEnv, table, parseInt(id)).first();
+    if (row) {
+      await env.DB.prepare('DELETE FROM rows WHERE pk=?').bind(row.pk).run();
+      deleted++;
+    }
+  }
+  if (deleted > 0) {
+    await env.DB.prepare('UPDATE table_sequences SET total_rows=MAX(0,total_rows-?) WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(deleted, userId, project, dbEnv, table).run();
+  }
+  trackUsage(env, userId, project, 'write').catch(() => {});
+  return jsonResp({ success: true, deleted });
+}
+
+// ─── Snapshots (Time Travel) ──────────────────────────────────────────────────
+
+async function writeSnapshot(env, userId, projectId, envName, tableName, operation, rows) {
+  try {
+    await env.DB.prepare(
+      'INSERT INTO row_snapshots (id,user_id,project_id,env,table_name,operation,snapshot_json,row_count,created_at) VALUES (?,?,?,?,?,?,?,?,?)'
+    ).bind(randomHex(12), userId, projectId, envName, tableName, operation, JSON.stringify(rows), rows.length, new Date().toISOString()).run();
+  } catch {}
+}
+
+async function handleSnapshotList(request, env, projectId, envName, tableName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const url   = new URL(request.url);
+  const limit = Math.min(50, parseInt(url.searchParams.get('limit') || '20'));
+  const { results } = await env.DB.prepare(
+    'SELECT id,operation,row_count,created_at FROM row_snapshots WHERE user_id=? AND project_id=? AND env=? AND table_name=? ORDER BY created_at DESC LIMIT ?'
+  ).bind(user.id, projectId, envName, tableName, limit).all();
+  return jsonResp(results.map(r => ({ id: r.id, operation: r.operation, rowCount: r.row_count, createdAt: r.created_at })));
+}
+
+async function handleRollback(request, env, projectId, envName, tableName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { snapshotId } = await request.json().catch(() => ({}));
+  if (!snapshotId) return errResp('snapshotId is required', 'MISSING_SNAPSHOT_ID');
+  const snapshot = await env.DB.prepare(
+    'SELECT * FROM row_snapshots WHERE id=? AND user_id=? AND project_id=? AND env=? AND table_name=?'
+  ).bind(snapshotId, user.id, projectId, envName, tableName).first();
+  if (!snapshot) return errResp('Snapshot not found', 'NOT_FOUND', 404);
+  const rows = JSON.parse(snapshot.snapshot_json || '[]');
+  const now = new Date().toISOString();
+  const operation = snapshot.operation;
+
+  if (operation === 'DELETE' || operation === 'BULK_DELETE') {
+    // Re-insert the deleted rows with their original IDs
+    for (const row of rows) {
+      const { id, createdAt, updatedAt, ...data } = row;
+      const exists = await env.DB.prepare('SELECT pk FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? AND forge_id=?').bind(user.id, projectId, envName, tableName, id).first();
+      if (!exists) {
+        await env.DB.prepare('INSERT INTO rows (forge_id,user_id,project_id,env,table_name,data_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').bind(id, user.id, projectId, envName, tableName, JSON.stringify(data), createdAt || now, now).run();
+        await env.DB.prepare('UPDATE table_sequences SET total_rows=total_rows+1 WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).run();
+      }
+    }
+  } else if (operation === 'UPDATE') {
+    // Restore rows to their pre-update state
+    for (const row of rows) {
+      const { id, createdAt, updatedAt, ...data } = row;
+      await env.DB.prepare('UPDATE rows SET data_json=?,updated_at=? WHERE user_id=? AND project_id=? AND env=? AND table_name=? AND forge_id=?').bind(JSON.stringify(data), now, user.id, projectId, envName, tableName, id).run();
+    }
+  } else if (operation === 'INSERT') {
+    // Delete the rows that were inserted
+    for (const row of rows) {
+      await env.DB.prepare('DELETE FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? AND forge_id=?').bind(user.id, projectId, envName, tableName, row.id).run();
+      await env.DB.prepare('UPDATE table_sequences SET total_rows=MAX(0,total_rows-1) WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).run();
+    }
+  }
+
+  writeAudit(env, user.id, projectId, 'table.rollback', { table: tableName, env: envName, snapshotId, operation }, request);
+  return jsonResp({ success: true, restored: rows.length, operation });
+}
+
+// ─── CSV Import ───────────────────────────────────────────────────────────────
+
+async function handleCsvImport(request, env, projectId, envName, tableName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+
+  const contentType = request.headers.get('content-type') || '';
+  let csvText = '';
+
+  if (contentType.includes('multipart/form-data')) {
+    const formData = await request.formData().catch(() => null);
+    if (!formData) return errResp('Could not parse form data', 'INVALID_BODY');
+    const file = formData.get('file');
+    if (!file) return errResp('No file field in form data', 'MISSING_FILE');
+    csvText = typeof file === 'string' ? file : await file.text();
+  } else {
+    csvText = await request.text().catch(() => '');
+  }
+
+  if (!csvText.trim()) return errResp('Empty CSV', 'EMPTY_CSV');
+
+  // Parse CSV
+  const lines = csvText.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return errResp('CSV must have a header row and at least one data row', 'INVALID_CSV');
+
+  const parseCSVLine = (line) => {
+    const cols = [];
+    let cur = '', inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuote = !inQuote;
+      } else if (ch === ',' && !inQuote) {
+        cols.push(cur); cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    cols.push(cur);
+    return cols.map(c => c.trim());
+  };
+
+  const headers = parseCSVLine(lines[0]);
+  if (headers.length === 0) return errResp('No headers found in CSV', 'INVALID_CSV');
+
+  // Validate headers are valid column names
+  for (const h of headers) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(h)) return errResp(`Invalid column name in CSV header: "${h}"`, 'INVALID_HEADER');
+  }
+
+  // Get schema for validation
+  const schema = await env.DB.prepare('SELECT columns_json FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).first();
+  const columns = schema ? JSON.parse(schema.columns_json || '[]') : [];
+
+  const inserted = [];
+  const errors   = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const vals = parseCSVLine(lines[i]);
+    let data = {};
+    for (let j = 0; j < headers.length; j++) {
+      const raw = vals[j] ?? '';
+      data[headers[j]] = raw === '' ? null : raw;
+    }
+
+    if (columns.length > 0) {
+      for (const col of columns) {
+        if (data[col.name] !== undefined && data[col.name] !== null) {
+          data[col.name] = coerceValue(data[col.name], col.type);
+        }
+      }
+      data = applyDefaults(data, columns);
+      const rowErrors = validateRow(data, columns);
+      if (rowErrors.length > 0) { errors.push({ row: i, errors: rowErrors }); continue; }
+      const uniqueErr = await enforceUnique(env.DB, user.id, projectId, envName, tableName, data, columns);
+      if (uniqueErr) { errors.push({ row: i, errors: [uniqueErr] }); continue; }
+    }
+
+    const now = new Date().toISOString();
+    await env.DB.prepare('INSERT OR IGNORE INTO table_sequences (user_id,project_id,env,table_name,last_id,total_rows) VALUES (?,?,?,?,0,0)').bind(user.id, projectId, envName, tableName).run();
+    await env.DB.prepare('UPDATE table_sequences SET last_id=last_id+1,total_rows=total_rows+1 WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).run();
+    const seq = await env.DB.prepare('SELECT last_id FROM table_sequences WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, projectId, envName, tableName).first();
+    await env.DB.prepare('INSERT INTO rows (forge_id,user_id,project_id,env,table_name,data_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').bind(seq.last_id, user.id, projectId, envName, tableName, JSON.stringify(data), now, now).run();
+    inserted.push({ id: seq.last_id, ...data });
+  }
+
+  trackUsage(env, user.id, projectId, 'write').catch(() => {});
+  writeAudit(env, user.id, projectId, 'table.csv_import', { table: tableName, env: envName, inserted: inserted.length, skipped: errors.length }, request);
+  return jsonResp({ success: true, inserted: inserted.length, skipped: errors.length, errors: errors.slice(0, 20) }, 201);
+}
+
+// ─── SQL Runner ───────────────────────────────────────────────────────────────
+
+async function handleDbQuery(request, env, project, dbEnv) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+
+  const { sql, save, saveName } = await request.json().catch(() => ({}));
+  if (!sql) return errResp('SQL query required', 'MISSING_SQL');
+
+  // Security checks
+  const safetyErr = checkSQLSafety(sql.trim());
+  if (safetyErr) return errResp(safetyErr, 'SQL_BLOCKED', 400);
+
+  const stmtType = detectStatementType(sql.trim());
+  const start = Date.now();
+
+  try {
+    let result;
+
+    if (stmtType === 'SELECT') {
+      const table = extractTableFromSelect(sql);
+      if (!table) return errResp('Could not find table name in query', 'INVALID_QUERY');
+
+      const { results } = await env.DB.prepare(
+        'SELECT forge_id,data_json,created_at,updated_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? ORDER BY forge_id ASC'
+      ).bind(user.id, project, dbEnv, table).all();
+
+      const allRows = results.map(r => ({ id: r.forge_id, ...JSON.parse(r.data_json || '{}'), createdAt: r.created_at, updatedAt: r.updated_at }));
+      result = execSelect(allRows, sql);
+      result.executionTime = Date.now() - start;
+      trackUsage(env, user.id, project, 'read').catch(() => {});
+
+    } else if (stmtType === 'INSERT') {
+      const parsed = parseInsertSQL(sql.trim());
+      if (!parsed) return errResp('Could not parse INSERT statement', 'INVALID_QUERY');
+
+      const schema = await env.DB.prepare('SELECT columns_json FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, project, dbEnv, parsed.table).first();
+      if (!schema) return errResp(`Table "${parsed.table}" not found`, 'NOT_FOUND', 404);
+
+      const columns = JSON.parse(schema.columns_json || '[]');
+      let data = parsed.data || {};
+      if (columns.length > 0) {
+        data = applyDefaults(data, columns);
+        const errors = validateRow(data, columns);
+        if (errors.length > 0) return errResp(`Validation failed: ${errors.join(', ')}`, 'VALIDATION_ERROR');
+        const uniqueErr = await enforceUnique(env.DB, user.id, project, dbEnv, parsed.table, data, columns);
+        if (uniqueErr) return errResp(uniqueErr, 'UNIQUE_VIOLATION', 409);
+      }
+      const now = new Date().toISOString();
+      await env.DB.prepare('INSERT OR IGNORE INTO table_sequences (user_id,project_id,env,table_name,last_id,total_rows) VALUES (?,?,?,?,0,0)').bind(user.id, project, dbEnv, parsed.table).run();
+      await env.DB.prepare('UPDATE table_sequences SET last_id=last_id+1,total_rows=total_rows+1 WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, project, dbEnv, parsed.table).run();
+      const seq = await env.DB.prepare('SELECT last_id FROM table_sequences WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, project, dbEnv, parsed.table).first();
+      await env.DB.prepare('INSERT INTO rows (forge_id,user_id,project_id,env,table_name,data_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').bind(seq.last_id, user.id, project, dbEnv, parsed.table, JSON.stringify(data), now, now).run();
+      result = { rows: [{ id: seq.last_id, ...data }], rowsAffected: 1, total: 1, executionTime: Date.now() - start };
+      trackUsage(env, user.id, project, 'write').catch(() => {});
+
+    } else if (stmtType === 'UPDATE') {
+      const parsed = parseUpdateSQL(sql.trim());
+      if (!parsed) return errResp('Could not parse UPDATE statement', 'INVALID_QUERY');
+
+      const { results } = await env.DB.prepare(
+        'SELECT pk,forge_id,data_json,created_at FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? ORDER BY forge_id ASC'
+      ).bind(user.id, project, dbEnv, parsed.table).all();
+
+      let toUpdate = results.map(r => ({ _pk: r.pk, id: r.forge_id, ...JSON.parse(r.data_json || '{}'), createdAt: r.created_at }));
+      if (parsed.whereStr) {
+        const whereTree = parseWhere(parsed.whereStr);
+        toUpdate = toUpdate.filter(r => evalWhere(r, whereTree));
+      }
+
+      let updated = 0;
+      const now = new Date().toISOString();
+      for (const row of toUpdate) {
+        const merged = { ...row, ...parsed.updates };
+        delete merged._pk; delete merged.id; delete merged.createdAt;
+        await env.DB.prepare('UPDATE rows SET data_json=?,updated_at=? WHERE pk=?').bind(JSON.stringify(merged), now, row._pk).run();
+        updated++;
+      }
+      result = { rows: [], rowsAffected: updated, total: 0, executionTime: Date.now() - start };
+      trackUsage(env, user.id, project, 'write').catch(() => {});
+
+    } else if (stmtType === 'DELETE') {
+      const parsed = parseDeleteSQL(sql.trim());
+      if (!parsed) return errResp('Could not parse DELETE statement', 'INVALID_QUERY');
+
+      const { results } = await env.DB.prepare(
+        'SELECT pk,forge_id,data_json FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=? ORDER BY forge_id ASC'
+      ).bind(user.id, project, dbEnv, parsed.table).all();
+
+      let toDelete = results.map(r => ({ pk: r.pk, id: r.forge_id, ...JSON.parse(r.data_json || '{}') }));
+      if (parsed.whereStr) {
+        const whereTree = parseWhere(parsed.whereStr);
+        toDelete = toDelete.filter(r => evalWhere(r, whereTree));
+      }
+      if (toDelete.length === 0) return errResp('No rows match the WHERE clause', 'NO_MATCH');
+
+      for (const row of toDelete) {
+        await env.DB.prepare('DELETE FROM rows WHERE pk=?').bind(row.pk).run();
+      }
+      await env.DB.prepare('UPDATE table_sequences SET total_rows=MAX(0,total_rows-?) WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(toDelete.length, user.id, project, dbEnv, parsed.table).run();
+      result = { rows: [], rowsAffected: toDelete.length, total: 0, executionTime: Date.now() - start };
+      trackUsage(env, user.id, project, 'write').catch(() => {});
+
+    } else if (stmtType === 'CREATE_TABLE') {
+      const parsed = parseCreateTableSQL(sql.trim());
+      if (!parsed) return errResp('Could not parse CREATE TABLE statement', 'INVALID_QUERY');
+      const existing = await env.DB.prepare('SELECT 1 FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, project, dbEnv, parsed.tableName).first();
+      if (existing) return errResp(`Table "${parsed.tableName}" already exists`, 'DUPLICATE_TABLE', 409);
+      const now = new Date().toISOString();
+      await env.DB.batch([
+        env.DB.prepare('INSERT INTO table_schemas (user_id,project_id,env,table_name,columns_json,strict,created_at,updated_at) VALUES (?,?,?,?,?,0,?,?)').bind(user.id, project, dbEnv, parsed.tableName, JSON.stringify(parsed.columns), now, now),
+        env.DB.prepare('INSERT OR IGNORE INTO table_sequences (user_id,project_id,env,table_name,last_id,total_rows) VALUES (?,?,?,?,0,0)').bind(user.id, project, dbEnv, parsed.tableName),
+      ]);
+      result = { rows: [], rowsAffected: 0, total: 0, message: `Table "${parsed.tableName}" created`, executionTime: Date.now() - start };
+
+    } else if (stmtType === 'DROP_TABLE') {
+      const tableName = parseDropTableSQL(sql.trim());
+      if (!tableName) return errResp('Could not parse DROP TABLE statement', 'INVALID_QUERY');
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM table_schemas WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, project, dbEnv, tableName),
+        env.DB.prepare('DELETE FROM table_sequences WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, project, dbEnv, tableName),
+        env.DB.prepare('DELETE FROM rows WHERE user_id=? AND project_id=? AND env=? AND table_name=?').bind(user.id, project, dbEnv, tableName),
+      ]);
+      result = { rows: [], rowsAffected: 0, total: 0, message: `Table "${tableName}" dropped`, executionTime: Date.now() - start };
+    } else {
+      return errResp('Unsupported SQL statement. Supported: SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE', 'UNSUPPORTED_STMT');
+    }
+
+    // Save to query history
+    const histId = randomHex(8);
+    env.DB.prepare('INSERT INTO sql_query_history (id,user_id,project_id,env,sql_text,success,rows_affected,duration_ms,executed_at) VALUES (?,?,?,?,?,1,?,?,?)').bind(histId, user.id, project, dbEnv, sql, result.rowsAffected || result.total || 0, result.executionTime, new Date().toISOString()).run().catch(() => {});
+
+    // Save named query
+    if (save && saveName) {
+      const now = new Date().toISOString();
+      const existing = await env.DB.prepare('SELECT id FROM saved_queries WHERE user_id=? AND project_id=? AND env=? AND name=?').bind(user.id, project, dbEnv, saveName).first();
+      if (existing) {
+        await env.DB.prepare('UPDATE saved_queries SET sql_text=?,updated_at=? WHERE id=?').bind(sql, now, existing.id).run();
+      } else {
+        await env.DB.prepare('INSERT INTO saved_queries (id,user_id,project_id,env,name,sql_text,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').bind(randomHex(8), user.id, project, dbEnv, saveName, sql, now, now).run();
+      }
+    }
+
+    return jsonResp({ success: true, ...result });
+
+  } catch (e) {
+    // Save failed query to history
+    env.DB.prepare('INSERT INTO sql_query_history (id,user_id,project_id,env,sql_text,success,rows_affected,duration_ms,executed_at) VALUES (?,?,?,?,?,0,0,?,?)').bind(randomHex(8), user.id, project, dbEnv, sql, Date.now() - start, new Date().toISOString()).run().catch(() => {});
+    return errResp(e.message || 'Query execution failed', 'QUERY_ERROR', 400);
+  }
+}
+
+// SQL Query History
+async function handleQueryHistory(request, env, projectId, envName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const url = new URL(request.url);
+  const limit = Math.min(50, parseInt(url.searchParams.get('limit') || '20'));
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM sql_query_history WHERE user_id=? AND project_id=? AND env=? ORDER BY executed_at DESC LIMIT ?'
+  ).bind(user.id, projectId, envName, limit).all();
+  return jsonResp(results.map(r => ({ id: r.id, sql: r.sql_text, success: r.success === 1, rowsAffected: r.rows_affected, duration: r.duration_ms, executedAt: r.executed_at })));
+}
+
+// Saved Queries
+async function handleSavedQueriesList(request, env, projectId, envName) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { results } = await env.DB.prepare('SELECT * FROM saved_queries WHERE user_id=? AND project_id=? AND env=? ORDER BY updated_at DESC').bind(user.id, projectId, envName).all();
+  return jsonResp(results.map(r => ({ id: r.id, name: r.name, sql: r.sql_text, createdAt: r.created_at, updatedAt: r.updated_at })));
+}
+
+async function handleSavedQueryDelete(request, env, projectId, envName, queryId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const q = await env.DB.prepare('SELECT id FROM saved_queries WHERE id=? AND user_id=? AND project_id=?').bind(queryId, user.id, projectId).first();
+  if (!q) return errResp('Query not found', 'NOT_FOUND', 404);
+  await env.DB.prepare('DELETE FROM saved_queries WHERE id=?').bind(queryId).run();
+  return jsonResp({ success: true });
+}
+
+// ─── Logs ─────────────────────────────────────────────────────────────────────
+
+async function handleLogs(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const url   = new URL(request.url);
+  const page  = Math.max(1, parseInt(url.searchParams.get('page')  || '1'));
+  const limit = Math.min(200, parseInt(url.searchParams.get('limit') || '50'));
+  const opFilter     = url.searchParams.get('operation');
+  const tableFilter  = url.searchParams.get('table');
+  const statusFilter = url.searchParams.get('status');
+
+  let query = 'SELECT * FROM request_logs WHERE user_id=? AND project_id=?';
+  const binds = [user.id, projectId];
+
+  if (opFilter && opFilter !== 'ALL') { query += ' AND operation=?'; binds.push(opFilter); }
+  if (tableFilter) { query += ' AND table_name=?'; binds.push(tableFilter); }
+  if (statusFilter === '2xx') { query += ' AND status_code >= 200 AND status_code < 300'; }
+  if (statusFilter === '4xx/5xx') { query += ' AND status_code >= 400'; }
+
+  // Count first
+  const countQ = query.replace('SELECT *', 'SELECT COUNT(*) as cnt');
+  const countRow = await env.DB.prepare(countQ).bind(...binds).first();
+  const total = countRow?.cnt || 0;
+
+  query += ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';
+  binds.push(limit, (page - 1) * limit);
+
+  const { results } = await env.DB.prepare(query).bind(...binds).all();
+  return jsonResp({
+    logs: results.map(l => ({
+      id: l.id, operation: l.operation, table: l.table_name, database: l.db_env,
+      keyPrefix: l.key_prefix, statusCode: l.status_code, responseTime: l.duration_ms,
+      timestamp: l.timestamp, error: l.error_msg, requestPath: l.request_path,
+    })),
+    total,
+    totalPages: Math.ceil(total / limit) || 1,
+  });
+}
+
+// ─── Usage ────────────────────────────────────────────────────────────────────
+
+async function handleUsage(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const limits = getPlanLimits(user);
+  const month  = new Date().toISOString().slice(0, 7);
+  const row    = await env.DB.prepare('SELECT * FROM usage WHERE user_id=? AND project_id=? AND month=?').bind(user.id, projectId, month).first();
+  const { results: tables } = await env.DB.prepare('SELECT COUNT(*) as cnt FROM table_schemas WHERE user_id=? AND project_id=?').bind(user.id, projectId).all();
+  const { results: keys }   = await env.DB.prepare('SELECT COUNT(*) as cnt FROM api_keys WHERE user_id=? AND project_id=? AND revoked=0').bind(user.id, projectId).all();
+  const now = new Date();
+
+  const reads  = row?.reads        || 0;
+  const writes = row?.writes       || 0;
+  const tableCount = tables[0]?.cnt || 0;
+  const keyCount   = keys[0]?.cnt   || 0;
+
+  // Usage alerts (80% threshold) — fire async
+  if (limits.reads && reads / limits.reads >= 0.8) {
+    const alertKey = `alert:reads:${user.id}:${month}`;
+    const alerted = await env.KV.get(alertKey).catch(() => null);
+    if (!alerted) {
+      sendUsageAlertEmail(env, { email: user.email, username: user.username, metric: 'reads', percent: Math.round(reads / limits.reads * 100) }).catch(() => {});
+      env.KV.put(alertKey, '1', { expirationTtl: 30 * 24 * 60 * 60 }).catch(() => {});
+    }
+  }
+
+  return jsonResp({
+    plan: user.plan,
+    cycle: { from: new Date(now.getFullYear(), now.getMonth(), 1).toISOString(), to: new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString() },
+    reads:     { used: reads,   limit: limits.reads },
+    writes:    { used: writes,  limit: limits.writes },
+    storage:   { used: row?.storage_bytes || 0, limit: limits.storage },
+    databases: { used: 2,       limit: limits.databases },
+    tables:    { used: tableCount, limit: limits.tables },
+    apiKeys:   { used: keyCount,   limit: limits.apiKeys },
+  });
+}
+
+// ─── Webhooks ─────────────────────────────────────────────────────────────────
+
+async function handleWebhooksList(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { results } = await env.DB.prepare('SELECT * FROM webhooks WHERE user_id=? AND project_id=?').bind(user.id, projectId).all();
+  return jsonResp(results.map(normalizeWebhook));
+}
+
+async function handleWebhookCreate(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const limits = getPlanLimits(user);
+  if (limits.webhooks !== null) {
+    const { results: existing } = await env.DB.prepare('SELECT id FROM webhooks WHERE user_id=? AND project_id=?').bind(user.id, projectId).all();
+    if (existing.length >= limits.webhooks) return errResp(`Free plan allows ${limits.webhooks} webhooks`, 'LIMIT_REACHED', 403);
+  }
+  const { name, url, events = [], active = true } = await request.json().catch(() => ({}));
+  if (!name || !url) return errResp('name and url are required', 'MISSING_FIELDS');
+  const id = randomHex(8); const now = new Date().toISOString();
+  await env.DB.prepare('INSERT INTO webhooks (id,name,url,events_json,active,user_id,project_id,last_triggered,success_rate,created_at) VALUES (?,?,?,?,?,?,?,NULL,100,?)').bind(id, name, url, JSON.stringify(events), active ? 1 : 0, user.id, projectId, now).run();
+  return jsonResp({ id, name, url, events, active, userId: user.id, projectId, lastTriggered: null, successRate: 100, createdAt: now }, 201);
+}
+
+async function handleWebhookDelete(request, env, projectId, webhookId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const hook = await env.DB.prepare('SELECT id FROM webhooks WHERE id=? AND user_id=? AND project_id=?').bind(webhookId, user.id, projectId).first();
+  if (!hook) return errResp('Webhook not found', 'NOT_FOUND', 404);
+  await env.DB.prepare('DELETE FROM webhooks WHERE id=?').bind(webhookId).run();
+  return jsonResp({ success: true });
+}
+
+// ─── Referral ─────────────────────────────────────────────────────────────────
+
+async function handleReferralStatus(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { results } = await env.DB.prepare(
+    'SELECT r.*,u.username,u.email,u.created_at as joined_at FROM referrals r JOIN users u ON r.referred_id=u.id WHERE r.referrer_id=?'
+  ).bind(user.id).all();
+  const verified = results.filter(r => r.verified === 1).length;
+  const rewarded = results.some(r => r.rewarded === 1);
+  const needed   = 5;
+  const link     = `${FRONTEND_URL}/app/register?ref=${user.referralCode}`;
+  return jsonResp({
+    code: user.referralCode,
+    link,
+    invited: results.map(r => ({ username: r.username, email: r.email, verified: r.verified === 1, joinedAt: r.joined_at })),
+    verified,
+    needed,
+    rewarded,
+    rewardUnlocked: verified >= needed && !rewarded,
+    extraProjects: user.extraProjects || 0,
+    extraReads: user.extraReads || 0,
+  });
+}
+
+async function handleReferralClaim(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { results } = await env.DB.prepare('SELECT * FROM referrals WHERE referrer_id=? AND verified=1 AND rewarded=0').bind(user.id).all();
+  if (results.length < 5) return errResp(`Need 5 verified referrals to claim reward. You have ${results.length}.`, 'NOT_ENOUGH');
+  // Mark rewarded
+  await env.DB.prepare('UPDATE referrals SET rewarded=1 WHERE referrer_id=? AND rewarded=0').bind(user.id).run();
+  await env.DB.prepare('UPDATE users SET extra_projects=extra_projects+3,extra_reads=extra_reads+15000 WHERE id=?').bind(user.id).run();
+  writeAudit(env, user.id, null, 'referral.reward_claimed', { extraProjects: 3, extraReads: 15000 }, request);
+  return jsonResp({ success: true, message: 'Reward claimed! +3 projects and +15,000 reads/month added to your plan.' });
+}
+
+// Verify referral when email confirmed (called after first sign-in)
+async function verifyReferral(env, userId) {
+  try {
+    const ref = await env.DB.prepare('SELECT * FROM referrals WHERE referred_id=? AND verified=0').bind(userId).first();
+    if (!ref) return;
+    await env.DB.prepare('UPDATE referrals SET verified=1 WHERE id=?').bind(ref.id).run();
+  } catch {}
+}
+
+// ─── Project Members (Pro Only) ───────────────────────────────────────────────
+
+async function handleMembersList(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Project not found or not owner', 'FORBIDDEN', 403);
+  const { results } = await env.DB.prepare(
+    'SELECT pm.*,u.username,u.email,u.avatar FROM project_members pm JOIN users u ON pm.user_id=u.id WHERE pm.project_id=?'
+  ).bind(projectId).all();
+  return jsonResp(results.map(m => ({ id: m.id, userId: m.user_id, username: m.username, email: m.email, avatar: m.avatar, role: m.role, joinedAt: m.joined_at })));
+}
+
+async function handleMemberRemove(request, env, projectId, memberId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Only the project owner can remove members', 'FORBIDDEN', 403);
+  await env.DB.prepare('DELETE FROM project_members WHERE id=? AND project_id=?').bind(memberId, projectId).run();
+  writeAudit(env, user.id, projectId, 'member.remove', { memberId }, request);
+  return jsonResp({ success: true });
+}
+
+async function handleInviteCreate(request, env, projectId, ctx) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  if (user.plan !== 'pro') return errResp('Team features are available on the Pro plan', 'PLAN_REQUIRED', 403);
+  // Allow project owner OR an admin member to send invites
+  const ownedProject = await env.DB.prepare('SELECT * FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  const adminMembership = !ownedProject
+    ? await env.DB.prepare('SELECT role FROM project_members WHERE project_id=? AND user_id=? AND role=?').bind(projectId, user.id, 'admin').first()
+    : null;
+  const project = ownedProject || (adminMembership
+    ? await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(projectId).first()
+    : null);
+  if (!project) return errResp('Project not found or insufficient permissions', 'FORBIDDEN', 403);
+  const { email: rawEmail, role = 'viewer' } = await request.json().catch(() => ({}));
+  const emailOrUsername = rawEmail?.trim().toLowerCase();
+  if (!emailOrUsername) return errResp('Email or username is required', 'MISSING_EMAIL');
+  if (!['admin', 'editor', 'viewer'].includes(role)) return errResp('Role must be admin, editor or viewer', 'INVALID_ROLE');
+  // Look up by email first, then fall back to username (useful for OAuth users)
+  const invitee = (await dbGetUserByEmail(env.DB, emailOrUsername))
+    || (await dbGetUserByUsername(env.DB, emailOrUsername));
+  if (!invitee) return errResp('No ForgeDB account found. Try their ForgeDB username instead — OAuth sign-ups may use a different email internally.', 'USER_NOT_FOUND', 404);
+  if (invitee.id === user.id) return errResp('Cannot invite yourself', 'INVALID_INVITE');
+  // Check not already a member
+  const existing = await env.DB.prepare('SELECT id FROM project_members WHERE project_id=? AND user_id=?').bind(projectId, invitee.id).first();
+  if (existing) return errResp('This user is already a member of the project', 'ALREADY_MEMBER', 409);
+  // Check for existing pending invite
+  const pendingInvite = await env.DB.prepare('SELECT id FROM project_invites WHERE project_id=? AND email=? AND accepted=0 AND expires_at > ?').bind(projectId, invitee.email, new Date().toISOString()).first();
+  if (pendingInvite) return errResp('A pending invite already exists for this email', 'INVITE_EXISTS', 409);
+
+  const token = randomHex(24);
+  const now   = new Date().toISOString();
+  const expires = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+  const id = randomHex(8);
+
+  await env.DB.prepare('INSERT INTO project_invites (id,token,project_id,invited_by,email,role,accepted,expires_at,created_at) VALUES (?,?,?,?,?,?,0,?,?)').bind(id, token, projectId, user.id, invitee.email, role, expires, now).run();
+
+  const inviteLink = `${FRONTEND_URL}/invite?token=${token}`;
+  ctx.waitUntil(sendInviteEmail(env, { email: invitee.email, inviterUsername: user.username, projectName: project.name, role, inviteLink }).catch(() => {}));
+  writeAudit(env, user.id, projectId, 'invite.send', { emailOrUsername: invitee.email, role }, request);
+
+  return jsonResp({ id, email: invitee.email, role, expiresAt: expires, inviteLink }, 201);
+}
+
+async function handleInvitesList(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Project not found or not owner', 'FORBIDDEN', 403);
+  const { results } = await env.DB.prepare('SELECT * FROM project_invites WHERE project_id=? AND accepted=0 AND expires_at > ? ORDER BY created_at DESC').bind(projectId, new Date().toISOString()).all();
+  return jsonResp(results.map(i => ({ id: i.id, email: i.email, role: i.role, expiresAt: i.expires_at, createdAt: i.created_at })));
+}
+
+async function handleInviteCancel(request, env, projectId, inviteId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const project = await env.DB.prepare('SELECT id FROM projects WHERE id=? AND user_id=?').bind(projectId, user.id).first();
+  if (!project) return errResp('Project not found or not owner', 'FORBIDDEN', 403);
+  await env.DB.prepare('DELETE FROM project_invites WHERE id=? AND project_id=?').bind(inviteId, projectId).run();
+  return jsonResp({ success: true });
+}
+
+async function handleInviteAccept(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { token } = await request.json().catch(() => ({}));
+  if (!token) return errResp('token is required', 'MISSING_TOKEN');
+  const invite = await env.DB.prepare('SELECT * FROM project_invites WHERE token=? AND accepted=0').bind(token).first();
+  if (!invite) return errResp('Invite not found or already used', 'NOT_FOUND', 404);
+  if (new Date(invite.expires_at) < new Date()) return errResp('Invite has expired', 'EXPIRED', 410);
+  if (invite.email !== user.email) return errResp('This invite was sent to a different email address', 'FORBIDDEN', 403);
+  const now = new Date().toISOString();
+  const existing = await env.DB.prepare('SELECT id FROM project_members WHERE project_id=? AND user_id=?').bind(invite.project_id, user.id).first();
+  if (!existing) {
+    await env.DB.prepare('INSERT INTO project_members (id,project_id,user_id,role,invited_by,joined_at) VALUES (?,?,?,?,?,?)').bind(randomHex(8), invite.project_id, user.id, invite.role, invite.invited_by, now).run();
+  }
+  await env.DB.prepare('UPDATE project_invites SET accepted=1 WHERE token=?').bind(token).run();
+  const project = await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(invite.project_id).first();
+  writeAudit(env, user.id, invite.project_id, 'invite.accepted', { role: invite.role }, request);
+  return jsonResp({ success: true, projectId: invite.project_id, projectName: project?.name, role: invite.role });
+}
+
+// Audit Log
+async function handleAuditLog(request, env, projectId) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const url   = new URL(request.url);
+  const page  = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+  const limit = Math.min(100, parseInt(url.searchParams.get('limit') || '50'));
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM audit_log WHERE user_id=? AND (project_id=? OR project_id IS NULL) ORDER BY created_at DESC LIMIT ? OFFSET ?'
+  ).bind(user.id, projectId, limit, (page - 1) * limit).all();
+  const { count } = await env.DB.prepare('SELECT COUNT(*) as count FROM audit_log WHERE user_id=? AND (project_id=? OR project_id IS NULL)').bind(user.id, projectId).first();
+  return jsonResp({ entries: results.map(e => ({ id: e.id, action: e.action, details: e.details ? JSON.parse(e.details) : null, ip: e.ip, createdAt: e.created_at })), total: count, totalPages: Math.ceil(count / limit) || 1 });
+}
+
+// ─── Announcements / Changelog ────────────────────────────────────────────────
+
+async function handleGetAnnouncement(request, env) {
+  const val = await env.KV.get('announcement:active', 'json');
+  return jsonResp(val || null);
+}
+
+async function handleSetAnnouncement(request, env) {
+  if (!await requireAdmin(request, env)) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const body = await request.json().catch(() => ({}));
+  if (!body.message) return errResp('message is required', 'MISSING_FIELDS');
+  await env.KV.put('announcement:active', JSON.stringify({ ...body, active: true }));
+  return jsonResp({ ok: true });
+}
+
+async function handleClearAnnouncement(request, env) {
+  if (!await requireAdmin(request, env)) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  await env.KV.delete('announcement:active');
+  return jsonResp({ ok: true });
+}
+
+async function handleGetChangelog(request, env) {
+  const val = await env.KV.get('changelog:index', 'json');
+  return jsonResp(val || []);
+}
+
+async function handleSaveChangelogEntry(request, env) {
+  if (!await requireAdmin(request, env)) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const entry = await request.json().catch(() => ({}));
+  if (!entry.id || !entry.version) return errResp('id and version are required', 'MISSING_FIELDS');
+  const current = await env.KV.get('changelog:index', 'json') || [];
+  const idx = current.findIndex(e => e.id === entry.id);
+  if (idx >= 0) current[idx] = entry; else current.unshift(entry);
+  await env.KV.put('changelog:index', JSON.stringify(current));
+  return jsonResp({ ok: true });
+}
+
+async function handleDeleteChangelogEntry(request, env) {
+  if (!await requireAdmin(request, env)) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const { id } = await request.json().catch(() => ({}));
+  if (!id) return errResp('id is required', 'MISSING_FIELDS');
+  const current = await env.KV.get('changelog:index', 'json') || [];
+  await env.KV.put('changelog:index', JSON.stringify(current.filter(e => e.id !== id)));
+  return jsonResp({ ok: true });
+}
+
+// ─── Billing ──────────────────────────────────────────────────────────────────
+
+async function handleBillingInitialize(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  if (user.plan === 'pro') {
+    const expiry = new Date(user.planExpiry || 0);
+    if (expiry > new Date()) return errResp('Already on Pro plan', 'ALREADY_PRO', 409);
+  }
+  const { billing } = await request.json().catch(() => ({}));
+  const plan = PLANS[billing] || PLANS.monthly;
+  const reference = `forge_${user.id}_${Date.now()}`;
+  const callbackUrl = `${FRONTEND_URL}/app/upgrade?ref=${reference}&billing=${billing}`;
+  const res = await fetch(`https://api.paystack.co/transaction/initialize`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: user.email, amount: plan.amount, reference, callback_url: callbackUrl, metadata: { userId: user.id, billing, custom_fields: [{ display_name: 'Username', variable_name: 'username', value: user.username }] } }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.status) return errResp(data.message || 'Payment initialization failed', 'PAYSTACK_ERROR', 502);
+  return jsonResp({ authorizationUrl: data.data.authorization_url, reference: data.data.reference, accessCode: data.data.access_code });
+}
+
+async function handleBillingVerify(request, env, reference) {
+  const user = await requireUser(request, env);
+  if (!user) return errResp('Unauthorized', 'UNAUTHORIZED', 401);
+  const res = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, { headers: { Authorization: `Bearer ${env.PAYSTACK_SECRET_KEY}` } });
+  const data = await res.json();
+  if (!res.ok || !data.status) return errResp('Verification failed', 'VERIFY_FAILED', 502);
+  const tx = data.data;
+  if (tx.status !== 'success') return jsonResp({ success: false, status: tx.status });
+  const billing = tx.metadata?.billing || 'monthly';
+  const plan = PLANS[billing] || PLANS.monthly;
+  if (tx.amount !== plan.amount) return errResp('Amount mismatch', 'AMOUNT_MISMATCH', 400);
+  if (tx.metadata?.userId !== user.id) return errResp('Forbidden', 'FORBIDDEN', 403);
+  const existing = await env.DB.prepare('SELECT id FROM payment_log WHERE reference=?').bind(reference).first();
+  if (existing) return jsonResp({ success: true, alreadyProcessed: true, plan: 'pro' });
+  const months = plan.months || 1;
+  const expiry = new Date();
+  expiry.setMonth(expiry.getMonth() + months);
+  const expiryStr = expiry.toISOString();
+  await env.DB.batch([
+    env.DB.prepare('UPDATE users SET plan=?,plan_expiry=? WHERE id=?').bind('pro', expiryStr, user.id),
+    env.DB.prepare('INSERT INTO payment_log (reference,user_id,amount,billing,created_at) VALUES (?,?,?,?,?)').bind(reference, user.id, tx.amount, billing, new Date().toISOString()),
+  ]);
+  // Verify their referral now that they're active
+  verifyReferral(env, user.id).catch(() => {});
+  return jsonResp({ success: true, plan: 'pro', planExpiry: expiryStr });
+}
+
+async function handlePaystackWebhook(request, env, ctx) {
+  const rawBody = await request.text();
+  const signature = request.headers.get('x-paystack-signature') || '';
+  const valid = await verifyPaystackSig(rawBody, signature, env.PAYSTACK_SECRET_KEY);
+  if (!valid) return new Response('Invalid signature', { status: 400 });
+  let event;
+  try { event = JSON.parse(rawBody); } catch { return new Response('Bad JSON', { status: 400 }); }
+  if (event.event !== 'charge.success') return new Response('OK', { status: 200 });
+  const tx = event.data;
+  if (!tx || tx.status !== 'success') return new Response('OK', { status: 200 });
+  const userId  = tx.metadata?.userId;
+  const billing = tx.metadata?.billing || 'monthly';
+  const plan    = PLANS[billing] || PLANS.monthly;
+  if (tx.amount !== plan.amount || !userId) return new Response('OK', { status: 200 });
+  const existing = await env.DB.prepare('SELECT id FROM payment_log WHERE reference=?').bind(tx.reference).first();
+  if (existing) return new Response('OK', { status: 200 });
+  const months = plan.months || 1;
+  const expiry = new Date();
+  expiry.setMonth(expiry.getMonth() + months);
+  const expiryStr = expiry.toISOString();
+  try {
+    const dbUser = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(userId).first();
+    await env.DB.batch([
+      env.DB.prepare('UPDATE users SET plan=?,plan_expiry=? WHERE id=?').bind('pro', expiryStr, userId),
+      env.DB.prepare('INSERT INTO payment_log (reference,user_id,amount,billing,created_at) VALUES (?,?,?,?,?)').bind(tx.reference, userId, tx.amount, billing, new Date().toISOString()),
+    ]);
+    if (dbUser) {
+      ctx.waitUntil(sendProUpgradeEmail(env, { email: dbUser.email, username: dbUser.username, expiry: expiryStr }).catch(() => {}));
+      ctx.waitUntil(verifyReferral(env, userId).catch(() => {}));
+    }
+  } catch (e) { console.error('[billing:webhook] DB error:', e.message); }
+  return new Response('OK', { status: 200 });
+}
+
+// Resend inbound webhook — delivery tracking
+async function handleResendWebhook(request, env) {
+  const body = await request.json().catch(() => ({}));
+  // Log delivery events for monitoring
+  const { type, data } = body;
+  console.log(`[resend] event=${type} email=${data?.email_id}`);
+  // Could track bounces / complaints in DB here
+  return new Response('OK', { status: 200 });
+}
+
+// ─── Admin ────────────────────────────────────────────────────────────────────
+
+async function handleAdminLogin(request, env) {
+  const formData = await request.formData();
+  const username = formData.get('username');
+  const password = formData.get('password');
+  if (username !== env.ADMIN_USERNAME || password !== env.ADMIN_PASSWORD) return htmlResp(adminLoginHTML('Invalid username or password'), 401);
+  const token = await signJWT({ sub: username, role: 'admin', exp: Date.now() + 8 * 60 * 60 * 1000 }, env.ADMIN_JWT_SECRET);
+  // FIX: path=/ so cookie is sent to both /admin and /api paths
+  return new Response(null, { status: 302, headers: { Location: '/admin/firekid/dashboard', 'Set-Cookie': `forge_admin=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800` } });
+}
+
+// ─── Main Fetch Handler ───────────────────────────────────────────────────────
+
+export default {
+  async fetch(request, env, ctx) {
+    const url    = new URL(request.url);
+    const method = request.method;
+    const path   = url.pathname;
+
+    // ─── Subdomain routing ────────────────────────────────────────────────────
+    // Data requests hit PROJECT_ID.forgedb.name.ng — extract projectId from host.
+    // Management requests (auth, projects, billing, etc.) stay on api.forgedb.name.ng.
+    const host      = url.hostname;                          // e.g. abc123.forgedb.name.ng
+    const parts     = host.split('.');
+    const subdomain = parts.length >= 3 ? parts[0] : null;  // abc123
+    const isDataHost = subdomain && subdomain !== 'api';     // not the management host
+
+    if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+
+    try {
+      // Admin
+      if (path.startsWith('/admin/firekid')) {
+        if (path === '/admin/firekid/login' && method === 'GET')  return htmlResp(adminLoginHTML());
+        if (path === '/admin/firekid/login' && method === 'POST') return handleAdminLogin(request, env);
+        const admin = await verifyAdmin(request, env);
+        if (!admin) return new Response(null, { status: 302, headers: { Location: '/admin/firekid/login' } });
+        return new Response(null, { status: 302, headers: { Location: `${FRONTEND_URL}${path}` } });
+      }
+
+      // Health
+      if (path === '/health' || path === '/heartbeat') return handleHealth(env);
+
+      // Resend inbound webhook
+      if (path === '/webhooks/resend' && method === 'POST') return handleResendWebhook(request, env);
+
+      // Billing
+      if (path === '/v1/billing/initialize' && method === 'POST') return handleBillingInitialize(request, env);
+      if (path === '/v1/billing/webhook'    && method === 'POST') return handlePaystackWebhook(request, env, ctx);
+
+      // Announcements
+      if (path === '/v1/announcements') {
+        if (method === 'GET')    return handleGetAnnouncement(request, env);
+        if (method === 'POST')   return handleSetAnnouncement(request, env);
+        if (method === 'DELETE') return handleClearAnnouncement(request, env);
+      }
+
+      // Changelog
+      if (path === '/v1/changelog') {
+        if (method === 'GET')    return handleGetChangelog(request, env);
+        if (method === 'POST')   return handleSaveChangelogEntry(request, env);
+        if (method === 'DELETE') return handleDeleteChangelogEntry(request, env);
+      }
+
+      // Auth
+      if (path === '/auth/register'        && method === 'POST')   return handleRegister(request, env, ctx);
+      if (path === '/auth/login'           && method === 'POST')   return handleLogin(request, env);
+      if (path === '/auth/change-password' && method === 'POST')   return handleChangePassword(request, env);
+      if (path === '/auth/me'              && method === 'GET')    return handleMe(request, env);
+      if (path === '/auth/me'              && method === 'PATCH')  return handleUpdateMe(request, env);
+      if (path === '/auth/me'              && method === 'DELETE') return handleDeleteMe(request, env);
+      if (path === '/auth/logout'          && method === 'POST')   return jsonResp({ success: true });
+      if (path === '/auth/github'          && method === 'GET')    return handleGitHubOAuth(request, env);
+      if (path === '/auth/github/callback' && method === 'GET')    return handleGitHubCallback(request, env, ctx);
+      if (path === '/auth/google'          && method === 'GET')    return handleGoogleOAuth(request, env);
+      if (path === '/auth/google/callback' && method === 'GET')    return handleGoogleCallback(request, env, ctx);
+      if (path === '/auth/cli-tokens'      && method === 'GET')    return handleCliTokenList(request, env);
+      if (path === '/auth/cli-tokens'      && method === 'POST')   return handleCliTokenCreate(request, env);
+
+      // Referral
+      if (path === '/v1/referral'        && method === 'GET')  return handleReferralStatus(request, env);
+      if (path === '/v1/referral/claim'  && method === 'POST') return handleReferralClaim(request, env);
+
+      // Invite accept
+      if (path === '/v1/invites/accept' && method === 'POST') return handleInviteAccept(request, env);
+
+      let m;
+
+      if ((m = path.match(/^\/v1\/billing\/verify\/([^/]+)$/)) && method === 'GET') return handleBillingVerify(request, env, m[1]);
+      if ((m = path.match(/^\/auth\/cli-tokens\/([^/]+)$/)) && method === 'DELETE') return handleCliTokenDelete(request, env, m[1]);
+
+      // CLI Auth
+      if (path === '/cli/auth/verify'     && method === 'POST') return handleCliAuthVerify(request, env);
+      if (path === '/cli/auth/poll'       && method === 'GET')  return handleCliSessionPoll(request, env);
+      if (url.searchParams.has('session') && method === 'GET')  return handleCliAuthPage(request);
+
+      // Projects
+      if (path === '/v1/projects' && method === 'GET')  return handleProjectsList(request, env);
+      if (path === '/v1/projects' && method === 'POST') return handleProjectCreate(request, env);
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)$/))) {
+        if (method === 'DELETE') return handleProjectDelete(request, env, m[1]);
+        if (method === 'PATCH')  return handleProjectRename(request, env, m[1]);
+      }
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/databases$/))   && method === 'GET')  return handleProjectDatabases(request, env, m[1]);
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/password$/))) {
+        if (method === 'GET')  return handleDbPasswordStatus(request, env, m[1]);
+        if (method === 'POST') return handleDbPasswordChange(request, env, m[1]);
+      }
+
+      // API Keys
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/keys$/))) {
+        if (method === 'GET')  return handleKeysList(request, env, m[1]);
+        if (method === 'POST') return handleKeyCreate(request, env, m[1]);
+      }
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/keys\/([^/]+)$/)) && method === 'DELETE') return handleKeyDelete(request, env, m[1], m[2]);
+
+      // Meta
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/logs$/))         && method === 'GET')    return handleLogs(request, env, m[1]);
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/usage$/))        && method === 'GET')    return handleUsage(request, env, m[1]);
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/audit$/))        && method === 'GET')    return handleAuditLog(request, env, m[1]);
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/webhooks$/))) {
+        if (method === 'GET')  return handleWebhooksList(request, env, m[1]);
+        if (method === 'POST') return handleWebhookCreate(request, env, m[1]);
+      }
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/webhooks\/([^/]+)$/)) && method === 'DELETE') return handleWebhookDelete(request, env, m[1], m[2]);
+
+      // Project Members / Invites (Pro only)
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/members$/))) {
+        if (method === 'GET') return handleMembersList(request, env, m[1]);
+      }
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/members\/([^/]+)$/)) && method === 'DELETE') return handleMemberRemove(request, env, m[1], m[2]);
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/invites$/))) {
+        if (method === 'GET')  return handleInvitesList(request, env, m[1]);
+        if (method === 'POST') return handleInviteCreate(request, env, m[1], ctx);
+      }
+      if ((m = path.match(/^\/v1\/projects\/([^/]+)\/invites\/([^/]+)$/)) && method === 'DELETE') return handleInviteCancel(request, env, m[1], m[2]);
+
+      // ─── Data Routes ─────────────────────────────────────────────────────────
+      // Two URL styles supported:
+      //   Subdomain (new):  PROJECT_ID.forgedb.name.ng/:env/tables
+      //   Path (legacy):    api.forgedb.name.ng/v1/PROJECT_ID/:env/tables
+      //
+      // Both are normalised to (projectId, dp) where dp = /:env/...
+      {
+        let projectId = null;
+        let dp = null; // normalised data path
+
+        if (isDataHost) {
+          // Subdomain style — projectId is the subdomain, path is already /:env/...
+          projectId = subdomain;
+          dp = path;
+        } else {
+          // Legacy path style — /v1/:projectId/:env/...
+          // Only match if not a management route
+          const legacyM = path.match(/^\/v1\/([^/]+)(\/[^/].*)$/);
+          if (legacyM &&
+              !path.startsWith('/v1/projects') &&
+              !path.startsWith('/v1/billing') &&
+              !path.startsWith('/v1/referral')) {
+            projectId = legacyM[1];
+            dp = legacyM[2]; // /:env/...
+          }
+        }
+
+        if (projectId && dp) {
+          // Tables
+          if ((m = dp.match(/^\/([^/]+)\/tables$/))) {
+            if (method === 'GET')  return handleTablesList(request, env, projectId, m[1]);
+            if (method === 'POST') return handleTableCreate(request, env, projectId, m[1]);
+          }
+          if ((m = dp.match(/^\/([^/]+)\/tables\/([^/]+)$/))) {
+            if (method === 'DELETE') return handleTableDelete(request, env, projectId, m[1], m[2]);
+            if (method === 'PUT')    return handleTableUpdate(request, env, projectId, m[1], m[2]);
+            if (method === 'GET')    return handleTableExport(request, env, projectId, m[1], m[2]);
+          }
+          if ((m = dp.match(/^\/([^/]+)\/tables\/([^/]+)\/columns$/)) && method === 'POST') return handleColumnAdd(request, env, projectId, m[1], m[2]);
+          if ((m = dp.match(/^\/([^/]+)\/tables\/([^/]+)\/columns\/([^/]+)$/))) {
+            if (method === 'DELETE') return handleColumnDelete(request, env, projectId, m[1], m[2], m[3]);
+            if (method === 'PATCH')  return handleColumnUpdate(request, env, projectId, m[1], m[2], m[3]);
+          }
+
+          // CSV import
+          if ((m = dp.match(/^\/([^/]+)\/tables\/([^/]+)\/import$/)) && method === 'POST') return handleCsvImport(request, env, projectId, m[1], m[2]);
+
+          // Time Travel — must match before generic /:table routes
+          if ((m = dp.match(/^\/([^/]+)\/([^/]+)\/snapshots$/)) && method === 'GET')  return handleSnapshotList(request, env, projectId, m[1], m[2]);
+          if ((m = dp.match(/^\/([^/]+)\/([^/]+)\/rollback$/))  && method === 'POST') return handleRollback(request, env, projectId, m[1], m[2]);
+
+          // SQL Runner + Query History + Saved Queries
+          if ((m = dp.match(/^\/([^/]+)\/query$/))                  && method === 'POST')   return handleDbQuery(request, env, projectId, m[1]);
+          if ((m = dp.match(/^\/([^/]+)\/query-history$/))          && method === 'GET')    return handleQueryHistory(request, env, projectId, m[1]);
+          if ((m = dp.match(/^\/([^/]+)\/saved-queries$/))          && method === 'GET')    return handleSavedQueriesList(request, env, projectId, m[1]);
+          if ((m = dp.match(/^\/([^/]+)\/saved-queries\/([^/]+)$/)) && method === 'DELETE') return handleSavedQueryDelete(request, env, projectId, m[1], m[2]);
+
+          // Bulk delete — must match before generic /:table route
+          if ((m = dp.match(/^\/([^/]+)\/([^/]+)\/bulk-delete$/)) && method === 'DELETE') return handleDbBulkDelete(request, env, projectId, m[1], m[2]);
+
+          // /:env/:table
+          if ((m = dp.match(/^\/([^/]+)\/([^/]+)$/))) {
+            if (method === 'GET')  return handleDbSelect(request, env, projectId, m[1], m[2]);
+            if (method === 'POST') return handleDbInsert(request, env, projectId, m[1], m[2]);
+          }
+
+          // /:env/:table/:id
+          if ((m = dp.match(/^\/([^/]+)\/([^/]+)\/(\d+)$/))) {
+            if (method === 'GET')    return handleDbGetById(request, env, projectId, m[1], m[2], m[3]);
+            if (method === 'PUT')    return handleDbUpdate(request, env, projectId, m[1], m[2], m[3]);
+            if (method === 'DELETE') return handleDbDelete(request, env, projectId, m[1], m[2], m[3]);
+          }
+        }
+      }
+
+      return errResp('Not found', 'NOT_FOUND', 404);
+
+    } catch (e) {
+      console.error('[worker] Unhandled error:', e.message, e.stack);
+      return errResp('An error occurred', 'INTERNAL_ERROR', 500);
+    }
+  },
+
+  // Cron: check expiring plans + GitHub backup
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(Promise.all([
+      checkExpiringPlans(env),
+      runGitHubBackup(env),
+    ]));
+  },
+};
+
+// ─── Cron: Plan Expiry Alerts ─────────────────────────────────────────────────
+
+async function checkExpiringPlans(env) {
+  try {
+    const in3days = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+    const now     = new Date().toISOString();
+    const { results } = await env.DB.prepare(
+      'SELECT * FROM users WHERE plan=\'pro\' AND plan_expiry > ? AND plan_expiry <= ?'
+    ).bind(now, in3days).all();
+    for (const user of results) {
+      const alertKey = `alert:expiry:${user.id}:${user.plan_expiry?.slice(0, 10)}`;
+      const alerted  = await env.KV.get(alertKey).catch(() => null);
+      if (!alerted) {
+        await sendPlanExpiryAlert(env, { email: user.email, username: user.username, planExpiry: user.plan_expiry }).catch(() => {});
+        await env.KV.put(alertKey, '1', { expirationTtl: 7 * 24 * 60 * 60 }).catch(() => {});
+      }
+    }
+  } catch (e) { console.error('[cron] Plan expiry check failed:', e.message); }
+}
+
+// ─── GitHub Backup ────────────────────────────────────────────────────────────
+
+async function githubReq(method, path, body, token) {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github.v3+json', 'User-Agent': 'ForgeDB-Worker/3.0', 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+async function ghBatchCommit(repo, changes, message, env) {
+  const username = env.GITHUB_USERNAME;
+  const token    = env.GITHUB_TOKEN;
+  let branchRes = await githubReq('GET', `/repos/${username}/${repo}/git/refs/heads/main`, null, token);
+  const branch = branchRes.status === 200 ? 'main' : 'master';
+  if (branchRes.status !== 200) branchRes = await githubReq('GET', `/repos/${username}/${repo}/git/refs/heads/master`, null, token);
+  const currentSha = branchRes.body.object.sha;
+  const commitRes  = await githubReq('GET', `/repos/${username}/${repo}/git/commits/${currentSha}`, null, token);
+  const treeSha    = commitRes.body.tree.sha;
+  const treeItems  = await Promise.all(changes.map(async change => {
+    const content = JSON.stringify(change.content, null, 2);
+    const encoded = btoa(unescape(encodeURIComponent(content)));
+    const blobRes = await githubReq('POST', `/repos/${username}/${repo}/git/blobs`, { content: encoded, encoding: 'base64' }, token);
+    return { path: change.path, mode: '100644', type: 'blob', sha: blobRes.body.sha };
+  }));
+  const newTreeRes   = await githubReq('POST', `/repos/${username}/${repo}/git/trees`,   { base_tree: treeSha, tree: treeItems }, token);
+  const newCommitRes = await githubReq('POST', `/repos/${username}/${repo}/git/commits`, { message, tree: newTreeRes.body.sha, parents: [currentSha] }, token);
+  await githubReq('PATCH', `/repos/${username}/${repo}/git/refs/heads/${branch}`, { sha: newCommitRes.body.sha, force: false }, token);
+  return newCommitRes.body.sha;
+}
+
+async function runGitHubBackup(env) {
+  const CONFIG_REPO = env.CONFIG_REPO || 'forge-config';
+  console.log('[backup] Starting backup', new Date().toISOString());
+  try {
+    const changes = [];
+    const now = new Date().toISOString();
+    const { results: users } = await env.DB.prepare('SELECT id,username,email,plan,plan_expiry,created_at FROM users').all();
+    changes.push({ path: 'backup/users.json', content: users });
+    const { results: projects } = await env.DB.prepare('SELECT * FROM projects').all();
+    changes.push({ path: 'backup/projects.json', content: projects });
+    const { results: schemas } = await env.DB.prepare('SELECT * FROM table_schemas').all();
+    changes.push({ path: 'backup/schemas.json', content: schemas });
+    changes.push({ path: 'backup/meta.json', content: { backedUpAt: now, version: '3.0.0' } });
+    const BATCH = 50;
+    for (let i = 0; i < changes.length; i += BATCH) {
+      await ghBatchCommit(CONFIG_REPO, changes.slice(i, i + BATCH), `backup ${now.slice(0, 19)} batch ${Math.floor(i / BATCH) + 1}`, env);
+    }
+    console.log('[backup] Done.');
+  } catch (e) { console.error('[backup] Failed:', e.message); }
+}
