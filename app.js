@@ -7,11 +7,14 @@ class GitHubPusher {
         this.stagedFiles = {};
         this.selectedFiles = new Set();
         this.repoStructure = {};
+        this.collapsedFolders = new Set();
+        this.theme = localStorage.getItem('theme') || 'dark';
         
         this.init();
     }
 
     init() {
+        this.applyTheme();
         this.setupEventListeners();
         this.loadSavedRepos();
         this.updateRepoIndicator();
@@ -253,9 +256,25 @@ class GitHubPusher {
             return;
         }
 
+        // Collapse all folders by default on first render
+        if (this.collapsedFolders.size === 0) {
+            this.collapseAllFolders(allFiles);
+        }
+
         container.innerHTML = this.renderTree(allFiles);
         lucide.createIcons();
         this.attachFileTreeListeners();
+    }
+
+    collapseAllFolders(tree, parentPath = '') {
+        for (const [name, value] of Object.entries(tree)) {
+            const isFile = value.content !== undefined || value.sha !== undefined;
+            if (!isFile) {
+                const folderPath = parentPath ? `${parentPath}/${name}` : name;
+                this.collapsedFolders.add(folderPath);
+                this.collapseAllFolders(value, folderPath);
+            }
+        }
     }
 
     buildTreeFromStaged() {
@@ -278,7 +297,7 @@ class GitHubPusher {
         return tree;
     }
 
-    renderTree(tree, level = 0) {
+    renderTree(tree, level = 0, parentPath = '') {
         let html = '';
         
         for (const [name, value] of Object.entries(tree)) {
@@ -298,12 +317,21 @@ class GitHubPusher {
                     </div>
                 `;
             } else {
+                const folderPath = parentPath ? `${parentPath}/${name}` : name;
+                const isCollapsed = this.collapsedFolders.has(folderPath);
+                const childrenHtml = this.renderTree(value, level + 1, folderPath);
+                
                 html += `
-                    <div class="tree-item folder" style="padding-left: ${indent}px">
+                    <div class="tree-item folder ${isCollapsed ? '' : 'expanded'}" 
+                         data-folder="${folderPath}"
+                         style="padding-left: ${indent}px">
+                        <i data-lucide="chevron-right" class="folder-icon"></i>
                         <i data-lucide="folder"></i>
                         <span>${name}</span>
                     </div>
-                    ${this.renderTree(value, level + 1)}
+                    <div class="tree-children ${isCollapsed ? '' : 'expanded'}">
+                        ${childrenHtml}
+                    </div>
                 `;
             }
         }
@@ -312,6 +340,7 @@ class GitHubPusher {
     }
 
     attachFileTreeListeners() {
+        // File clicks
         document.querySelectorAll('.tree-item.file').forEach(item => {
             item.addEventListener('click', (e) => {
                 if (e.target.type !== 'checkbox') {
@@ -320,6 +349,7 @@ class GitHubPusher {
             });
         });
 
+        // File checkboxes
         document.querySelectorAll('.file-checkbox').forEach(checkbox => {
             checkbox.addEventListener('change', (e) => {
                 e.stopPropagation();
@@ -330,6 +360,26 @@ class GitHubPusher {
                     this.selectedFiles.delete(path);
                 }
                 this.updateSelectionCount();
+            });
+        });
+
+        // Folder collapse/expand
+        document.querySelectorAll('.tree-item.folder').forEach(folder => {
+            folder.addEventListener('click', (e) => {
+                const folderPath = folder.dataset.folder;
+                const children = folder.nextElementSibling;
+                
+                if (this.collapsedFolders.has(folderPath)) {
+                    this.collapsedFolders.delete(folderPath);
+                    folder.classList.add('expanded');
+                    children.classList.add('expanded');
+                } else {
+                    this.collapsedFolders.add(folderPath);
+                    folder.classList.remove('expanded');
+                    children.classList.remove('expanded');
+                }
+                
+                lucide.createIcons();
             });
         });
     }
@@ -597,6 +647,125 @@ class GitHubPusher {
         }
     }
 
+    // ============ Theme Management ============
+    applyTheme() {
+        if (this.theme === 'light') {
+            document.body.classList.add('light-mode');
+            const icon = document.querySelector('#themeToggle i');
+            if (icon) {
+                icon.setAttribute('data-lucide', 'moon');
+                lucide.createIcons();
+            }
+        } else {
+            document.body.classList.remove('light-mode');
+            const icon = document.querySelector('#themeToggle i');
+            if (icon) {
+                icon.setAttribute('data-lucide', 'sun');
+                lucide.createIcons();
+            }
+        }
+    }
+
+    toggleTheme() {
+        this.theme = this.theme === 'dark' ? 'light' : 'dark';
+        localStorage.setItem('theme', this.theme);
+        this.applyTheme();
+    }
+
+    // ============ Root Path Adjustment ============
+    showRootAdjuster() {
+        if (Object.keys(this.stagedFiles).length === 0) {
+            this.showToast('No files to adjust. Upload files first.', 'error');
+            return;
+        }
+        document.getElementById('rootAdjuster').style.display = 'block';
+        this.updatePathPreview();
+    }
+
+    closeRootAdjuster() {
+        document.getElementById('rootAdjuster').style.display = 'none';
+    }
+
+    updatePathPreview() {
+        const operation = document.getElementById('pathOperation').value;
+        const pathValue = document.getElementById('pathValue').value;
+        const container = document.getElementById('pathPreview');
+
+        if (!pathValue) {
+            container.innerHTML = '<p style="color: var(--text-secondary); text-align: center;">Enter a path to see preview</p>';
+            return;
+        }
+
+        const previews = Object.keys(this.stagedFiles).slice(0, 10).map(path => {
+            const transformed = this.transformPath(path, operation, pathValue);
+            return `
+                <div class="path-preview-item">
+                    <span class="original">${path}</span>
+                    <span class="arrow">→</span>
+                    <span class="transformed">${transformed}</span>
+                </div>
+            `;
+        });
+
+        const total = Object.keys(this.stagedFiles).length;
+        container.innerHTML = previews.join('') + 
+            (total > 10 ? `<p style="color: var(--text-secondary); text-align: center; margin-top: 12px;">... and ${total - 10} more files</p>` : '');
+    }
+
+    transformPath(path, operation, value) {
+        if (operation === 'strip') {
+            // Strip prefix
+            if (path.startsWith(value)) {
+                return path.substring(value.length);
+            }
+            return path;
+        } else if (operation === 'add') {
+            // Add prefix
+            if (value === '../') {
+                // Go up one level (remove first directory)
+                const parts = path.split('/');
+                return parts.slice(1).join('/');
+            } else if (value === './') {
+                // Current level (no change)
+                return path;
+            } else {
+                // Add folder prefix
+                return value + path;
+            }
+        }
+        return path;
+    }
+
+    applyPathTransform() {
+        const operation = document.getElementById('pathOperation').value;
+        const pathValue = document.getElementById('pathValue').value;
+
+        if (!pathValue) {
+            this.showToast('Enter a path value', 'error');
+            return;
+        }
+
+        const newStagedFiles = {};
+        let transformedCount = 0;
+
+        Object.entries(this.stagedFiles).forEach(([path, file]) => {
+            const newPath = this.transformPath(path, operation, pathValue);
+            if (newPath !== path) {
+                transformedCount++;
+            }
+            newStagedFiles[newPath] = {
+                ...file,
+                path: newPath
+            };
+        });
+
+        this.stagedFiles = newStagedFiles;
+        this.closeRootAdjuster();
+        this.renderFileTree();
+        this.updateChanges();
+        this.showToast(`Transformed ${transformedCount} file paths`, 'success');
+    }
+
     // ============ Utilities ============
     validateConfig() {
         if (!this.config.token || !this.config.username || !this.config.repo) {
@@ -625,6 +794,9 @@ class GitHubPusher {
 
     // ============ Event Listeners ============
     setupEventListeners() {
+        // Theme toggle
+        document.getElementById('themeToggle').addEventListener('click', () => this.toggleTheme());
+
         // Tab navigation
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -655,6 +827,13 @@ class GitHubPusher {
         document.getElementById('fileSearch').addEventListener('input', (e) => {
             // TODO: Implement search filtering
         });
+
+        // Root path adjuster
+        document.getElementById('showRootAdjuster').addEventListener('click', () => this.showRootAdjuster());
+        document.getElementById('closeAdjuster').addEventListener('click', () => this.closeRootAdjuster());
+        document.getElementById('pathOperation').addEventListener('change', () => this.updatePathPreview());
+        document.getElementById('pathValue').addEventListener('input', () => this.updatePathPreview());
+        document.getElementById('applyPathTransform').addEventListener('click', () => this.applyPathTransform());
 
         // Batch operations
         document.getElementById('selectAll').addEventListener('click', () => this.selectAll());
