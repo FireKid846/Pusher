@@ -796,6 +796,48 @@ body::before {
     text-transform: uppercase;
 }
 
+.tree-item .badge-new {
+    background: var(--success);
+}
+
+.tree-item .badge-modified {
+    background: var(--cyan);
+}
+
+.tree-item .delete-file-btn {
+    margin-left: auto;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 50%;
+    cursor: pointer;
+    opacity: 0;
+    transition: all 0.2s ease;
+}
+
+.tree-item:hover .delete-file-btn {
+    opacity: 1;
+}
+
+.tree-item .delete-file-btn:hover {
+    background: var(--danger);
+    border-color: var(--danger);
+}
+
+.tree-item .delete-file-btn i {
+    width: 14px;
+    height: 14px;
+    color: var(--text-secondary);
+}
+
+.tree-item .delete-file-btn:hover i {
+    color: white;
+}
+
 .tree-children {
     display: none;
 }
