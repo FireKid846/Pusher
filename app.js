@@ -4,9 +4,10 @@ class GitHubPusher {
     constructor() {
         this.config = this.loadConfig();
         this.fileTree = {};
-        this.stagedFiles = {};
+        this.stagedFiles = {}; // Files with content (from zip or fetched)
+        this.repoFiles = {}; // Files from GitHub (metadata with SHA)
+        this.deletedFiles = new Set(); // Files marked for deletion
         this.selectedFiles = new Set();
-        this.repoStructure = {};
         this.collapsedFolders = new Set();
         this.theme = localStorage.getItem('theme') || 'dark';
         
@@ -173,40 +174,30 @@ class GitHubPusher {
             }
 
             const data = await response.json();
-            this.repoStructure = this.buildTreeStructure(data.tree);
+            
+            // Clear and rebuild repo files
+            this.repoFiles = {};
+            
+            // Store files with their metadata
+            data.tree.forEach(file => {
+                if (file.type === 'blob') {
+                    this.repoFiles[file.path] = {
+                        path: file.path,
+                        sha: file.sha,
+                        size: file.size,
+                        fromRepo: true
+                    };
+                }
+            });
+
             this.renderFileTree();
-            this.showToast('Repository structure loaded', 'success');
+            this.updateChanges();
+            this.showToast(`Loaded ${Object.keys(this.repoFiles).length} files from repository`, 'success');
         } catch (error) {
             this.showToast('Error: ' + error.message, 'error');
         } finally {
             this.showLoading(false);
         }
-    }
-
-    buildTreeStructure(files) {
-        const tree = {};
-        
-        files.forEach(file => {
-            if (file.type === 'blob') {
-                const parts = file.path.split('/');
-                let current = tree;
-                
-                for (let i = 0; i < parts.length - 1; i++) {
-                    if (!current[parts[i]]) {
-                        current[parts[i]] = {};
-                    }
-                    current = current[parts[i]];
-                }
-                
-                current[parts[parts.length - 1]] = {
-                    path: file.path,
-                    sha: file.sha,
-                    size: file.size
-                };
-            }
-        });
-        
-        return tree;
     }
 
     // ============ File Management ============
@@ -242,7 +233,9 @@ class GitHubPusher {
 
     renderFileTree() {
         const container = document.getElementById('fileTree');
-        const allFiles = { ...this.repoStructure, ...this.buildTreeFromStaged() };
+        
+        // Combine repo files and staged files
+        const allFiles = this.getAllFiles();
 
         if (Object.keys(allFiles).length === 0) {
             container.innerHTML = `
@@ -266,21 +259,28 @@ class GitHubPusher {
         this.attachFileTreeListeners();
     }
 
-    collapseAllFolders(tree, parentPath = '') {
-        for (const [name, value] of Object.entries(tree)) {
-            const isFile = value.content !== undefined || value.sha !== undefined;
-            if (!isFile) {
-                const folderPath = parentPath ? `${parentPath}/${name}` : name;
-                this.collapsedFolders.add(folderPath);
-                this.collapseAllFolders(value, folderPath);
+    getAllFiles() {
+        const combined = {};
+        
+        // Add repo files
+        Object.entries(this.repoFiles).forEach(([path, file]) => {
+            if (!this.deletedFiles.has(path)) {
+                combined[path] = file;
             }
-        }
+        });
+        
+        // Add/override with staged files
+        Object.entries(this.stagedFiles).forEach(([path, file]) => {
+            combined[path] = file;
+        });
+        
+        return this.buildTreeStructure(combined);
     }
 
-    buildTreeFromStaged() {
+    buildTreeStructure(files) {
         const tree = {};
         
-        Object.keys(this.stagedFiles).forEach(path => {
+        Object.entries(files).forEach(([path, file]) => {
             const parts = path.split('/');
             let current = tree;
             
@@ -291,21 +291,36 @@ class GitHubPusher {
                 current = current[parts[i]];
             }
             
-            current[parts[parts.length - 1]] = this.stagedFiles[path];
+            current[parts[parts.length - 1]] = file;
         });
         
         return tree;
+    }
+
+    collapseAllFolders(tree, parentPath = '') {
+        for (const [name, value] of Object.entries(tree)) {
+            const isFile = value.path !== undefined;
+            if (!isFile) {
+                const folderPath = parentPath ? `${parentPath}/${name}` : name;
+                this.collapsedFolders.add(folderPath);
+                this.collapseAllFolders(value, folderPath);
+            }
+        }
     }
 
     renderTree(tree, level = 0, parentPath = '') {
         let html = '';
         
         for (const [name, value] of Object.entries(tree)) {
-            const isFile = value.content !== undefined || value.sha !== undefined;
+            const isFile = value.path !== undefined;
             const indent = level * 20;
-            const isStaged = this.stagedFiles[value.path];
             
             if (isFile) {
+                const isStaged = this.stagedFiles[value.path] !== undefined;
+                const isFromRepo = this.repoFiles[value.path] !== undefined;
+                const isNew = isStaged && !isFromRepo;
+                const isModified = isStaged && isFromRepo;
+                
                 html += `
                     <div class="tree-item file ${isStaged ? 'staged' : ''}" 
                          data-path="${value.path}" 
@@ -313,7 +328,11 @@ class GitHubPusher {
                         <input type="checkbox" class="file-checkbox" ${this.selectedFiles.has(value.path) ? 'checked' : ''}>
                         <i data-lucide="file"></i>
                         <span>${name}</span>
-                        ${isStaged ? '<span class="badge">Modified</span>' : ''}
+                        ${isNew ? '<span class="badge badge-new">New</span>' : ''}
+                        ${isModified ? '<span class="badge badge-modified">Modified</span>' : ''}
+                        <button class="delete-file-btn" title="Delete file">
+                            <i data-lucide="trash-2"></i>
+                        </button>
                     </div>
                 `;
             } else {
@@ -343,7 +362,7 @@ class GitHubPusher {
         // File clicks
         document.querySelectorAll('.tree-item.file').forEach(item => {
             item.addEventListener('click', (e) => {
-                if (e.target.type !== 'checkbox') {
+                if (e.target.type !== 'checkbox' && !e.target.closest('.delete-file-btn')) {
                     this.previewFile(item.dataset.path);
                 }
             });
@@ -360,6 +379,15 @@ class GitHubPusher {
                     this.selectedFiles.delete(path);
                 }
                 this.updateSelectionCount();
+            });
+        });
+
+        // Delete file buttons
+        document.querySelectorAll('.delete-file-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const path = e.target.closest('.tree-item').dataset.path;
+                this.deleteFile(path);
             });
         });
 
@@ -384,6 +412,25 @@ class GitHubPusher {
         });
     }
 
+    deleteFile(path) {
+        if (!confirm(`Delete ${path}?`)) return;
+
+        // Remove from staged files if present
+        delete this.stagedFiles[path];
+        
+        // If it's a repo file, mark for deletion
+        if (this.repoFiles[path]) {
+            this.deletedFiles.add(path);
+        }
+
+        // Remove from selection
+        this.selectedFiles.delete(path);
+
+        this.renderFileTree();
+        this.updateChanges();
+        this.showToast('File marked for deletion', 'success');
+    }
+
     async previewFile(path) {
         const container = document.getElementById('filePreview');
         const file = this.stagedFiles[path];
@@ -393,7 +440,7 @@ class GitHubPusher {
                 <div class="empty-state">
                     <i data-lucide="file-text"></i>
                     <p>File from repository</p>
-                    <small>Cannot preview remote files</small>
+                    <small>Preview not available for repo files yet</small>
                 </div>
             `;
             lucide.createIcons();
@@ -438,7 +485,12 @@ class GitHubPusher {
     // ============ Batch Operations ============
     selectAll() {
         this.selectedFiles.clear();
-        Object.keys(this.stagedFiles).forEach(path => this.selectedFiles.add(path));
+        const allFiles = { ...this.repoFiles, ...this.stagedFiles };
+        Object.keys(allFiles).forEach(path => {
+            if (!this.deletedFiles.has(path)) {
+                this.selectedFiles.add(path);
+            }
+        });
         this.renderFileTree();
         this.updateSelectionCount();
     }
@@ -462,13 +514,19 @@ class GitHubPusher {
         if (!confirm(`Delete ${this.selectedFiles.size} files?`)) return;
 
         this.selectedFiles.forEach(path => {
+            // Remove from staged files if present
             delete this.stagedFiles[path];
+            
+            // If it's a repo file, mark for deletion
+            if (this.repoFiles[path]) {
+                this.deletedFiles.add(path);
+            }
         });
 
         this.selectedFiles.clear();
         this.renderFileTree();
         this.updateChanges();
-        this.showToast('Files deleted', 'success');
+        this.showToast('Files marked for deletion', 'success');
     }
 
     batchRename() {
@@ -481,19 +539,33 @@ class GitHubPusher {
         }
 
         let renamedCount = 0;
-        const newStaged = {};
+        const newRepoFiles = {};
+        const newStagedFiles = {};
 
-        Object.entries(this.stagedFiles).forEach(([path, file]) => {
+        // Rename repo files
+        Object.entries(this.repoFiles).forEach(([path, file]) => {
             if (this.selectedFiles.has(path)) {
                 const newPath = path.replace(pattern, replacement);
-                newStaged[newPath] = { ...file, path: newPath };
+                newRepoFiles[newPath] = { ...file, path: newPath };
                 renamedCount++;
             } else {
-                newStaged[path] = file;
+                newRepoFiles[path] = file;
             }
         });
 
-        this.stagedFiles = newStaged;
+        // Rename staged files
+        Object.entries(this.stagedFiles).forEach(([path, file]) => {
+            if (this.selectedFiles.has(path)) {
+                const newPath = path.replace(pattern, replacement);
+                newStagedFiles[newPath] = { ...file, path: newPath };
+                renamedCount++;
+            } else {
+                newStagedFiles[path] = file;
+            }
+        });
+
+        this.repoFiles = newRepoFiles;
+        this.stagedFiles = newStagedFiles;
         this.selectedFiles.clear();
         this.renderFileTree();
         this.updateChanges();
@@ -509,20 +581,35 @@ class GitHubPusher {
         }
 
         let movedCount = 0;
-        const newStaged = {};
+        const newRepoFiles = {};
+        const newStagedFiles = {};
 
+        // Move repo files
+        Object.entries(this.repoFiles).forEach(([path, file]) => {
+            if (this.selectedFiles.has(path)) {
+                const filename = path.split('/').pop();
+                const newPath = `${targetFolder}/${filename}`;
+                newRepoFiles[newPath] = { ...file, path: newPath };
+                movedCount++;
+            } else {
+                newRepoFiles[path] = file;
+            }
+        });
+
+        // Move staged files
         Object.entries(this.stagedFiles).forEach(([path, file]) => {
             if (this.selectedFiles.has(path)) {
                 const filename = path.split('/').pop();
                 const newPath = `${targetFolder}/${filename}`;
-                newStaged[newPath] = { ...file, path: newPath };
+                newStagedFiles[newPath] = { ...file, path: newPath };
                 movedCount++;
             } else {
-                newStaged[path] = file;
+                newStagedFiles[path] = file;
             }
         });
 
-        this.stagedFiles = newStaged;
+        this.repoFiles = newRepoFiles;
+        this.stagedFiles = newStagedFiles;
         this.selectedFiles.clear();
         this.renderFileTree();
         this.updateChanges();
@@ -560,12 +647,18 @@ class GitHubPusher {
             deleted: []
         };
 
+        // Check staged files
         Object.keys(this.stagedFiles).forEach(path => {
-            if (this.repoStructure[path]) {
+            if (this.repoFiles[path]) {
                 changes.modified.push(path);
             } else {
                 changes.added.push(path);
             }
+        });
+
+        // Check deleted files
+        this.deletedFiles.forEach(path => {
+            changes.deleted.push(path);
         });
 
         return changes;
@@ -593,7 +686,8 @@ class GitHubPusher {
             return;
         }
 
-        if (Object.keys(this.stagedFiles).length === 0) {
+        const hasChanges = Object.keys(this.stagedFiles).length > 0 || this.deletedFiles.size > 0;
+        if (!hasChanges) {
             this.showToast('No files to push', 'error');
             return;
         }
@@ -601,15 +695,24 @@ class GitHubPusher {
         this.showLoading(true);
 
         try {
-            // Push each file individually
+            // Push staged files (add/modify)
             for (const [path, file] of Object.entries(this.stagedFiles)) {
                 await this.pushFile(path, file, commitMessage);
             }
 
+            // Delete files
+            for (const path of this.deletedFiles) {
+                await this.deleteFileFromRepo(path, commitMessage);
+            }
+
             this.showToast('Successfully pushed all changes', 'success');
+            
+            // Clear staged and deleted files
             this.stagedFiles = {};
-            this.renderFileTree();
-            this.updateChanges();
+            this.deletedFiles.clear();
+            
+            // Re-fetch repo to get updated state
+            await this.fetchRepoStructure();
         } catch (error) {
             this.showToast('Push failed: ' + error.message, 'error');
         } finally {
@@ -626,9 +729,9 @@ class GitHubPusher {
             branch: this.config.branch
         };
 
-        // If file exists, include its SHA
-        if (this.repoStructure[path]?.sha) {
-            body.sha = this.repoStructure[path].sha;
+        // If file exists in repo, include its SHA
+        if (this.repoFiles[path]?.sha) {
+            body.sha = this.repoFiles[path].sha;
         }
 
         const response = await fetch(url, {
@@ -644,6 +747,36 @@ class GitHubPusher {
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.message || 'Push failed');
+        }
+    }
+
+    async deleteFileFromRepo(path, message) {
+        const url = `https://api.github.com/repos/${this.config.username}/${this.config.repo}/contents/${path}`;
+        
+        if (!this.repoFiles[path]?.sha) {
+            // File doesn't exist in repo, nothing to delete
+            return;
+        }
+
+        const body = {
+            message: message,
+            sha: this.repoFiles[path].sha,
+            branch: this.config.branch
+        };
+
+        const response = await fetch(url, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `token ${this.config.token}`,
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.message || 'Delete failed');
         }
     }
 
@@ -674,8 +807,9 @@ class GitHubPusher {
 
     // ============ Root Path Adjustment ============
     showRootAdjuster() {
-        if (Object.keys(this.stagedFiles).length === 0) {
-            this.showToast('No files to adjust. Upload files first.', 'error');
+        const allFiles = { ...this.repoFiles, ...this.stagedFiles };
+        if (Object.keys(allFiles).length === 0) {
+            this.showToast('No files to adjust. Fetch repo or upload files first.', 'error');
             return;
         }
         document.getElementById('rootAdjuster').style.display = 'block';
@@ -696,7 +830,10 @@ class GitHubPusher {
             return;
         }
 
-        const previews = Object.keys(this.stagedFiles).slice(0, 10).map(path => {
+        const allPaths = [...Object.keys(this.repoFiles), ...Object.keys(this.stagedFiles)];
+        const uniquePaths = [...new Set(allPaths)];
+        
+        const previews = uniquePaths.slice(0, 10).map(path => {
             const transformed = this.transformPath(path, operation, pathValue);
             return `
                 <div class="path-preview-item">
@@ -707,7 +844,7 @@ class GitHubPusher {
             `;
         });
 
-        const total = Object.keys(this.stagedFiles).length;
+        const total = uniquePaths.length;
         container.innerHTML = previews.join('') + 
             (total > 10 ? `<p style="color: var(--text-secondary); text-align: center; margin-top: 12px;">... and ${total - 10} more files</p>` : '');
     }
@@ -745,9 +882,24 @@ class GitHubPusher {
             return;
         }
 
-        const newStagedFiles = {};
         let transformedCount = 0;
 
+        // Transform repo files
+        const newRepoFiles = {};
+        Object.entries(this.repoFiles).forEach(([path, file]) => {
+            const newPath = this.transformPath(path, operation, pathValue);
+            if (newPath !== path) {
+                transformedCount++;
+            }
+            newRepoFiles[newPath] = {
+                ...file,
+                path: newPath
+            };
+        });
+        this.repoFiles = newRepoFiles;
+
+        // Transform staged files
+        const newStagedFiles = {};
         Object.entries(this.stagedFiles).forEach(([path, file]) => {
             const newPath = this.transformPath(path, operation, pathValue);
             if (newPath !== path) {
@@ -758,8 +910,16 @@ class GitHubPusher {
                 path: newPath
             };
         });
-
         this.stagedFiles = newStagedFiles;
+
+        // Transform deleted files
+        const newDeletedFiles = new Set();
+        this.deletedFiles.forEach(path => {
+            const newPath = this.transformPath(path, operation, pathValue);
+            newDeletedFiles.add(newPath);
+        });
+        this.deletedFiles = newDeletedFiles;
+
         this.closeRootAdjuster();
         this.renderFileTree();
         this.updateChanges();
