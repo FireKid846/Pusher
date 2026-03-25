@@ -200,6 +200,139 @@ class GitHubPusher {
         }
     }
 
+    async downloadRepo() {
+        if (!this.validateConfig()) return;
+
+        if (Object.keys(this.repoFiles).length === 0) {
+            this.showToast('Fetch repo structure first', 'error');
+            return;
+        }
+
+        this.showLoading(true);
+
+        try {
+            const zip = new JSZip();
+            const filePaths = Object.keys(this.repoFiles);
+            let completed = 0;
+
+            this.showToast(`Downloading ${filePaths.length} files...`, 'info');
+
+            // Fetch all files in parallel (with some throttling)
+            const batchSize = 5;
+            for (let i = 0; i < filePaths.length; i += batchSize) {
+                const batch = filePaths.slice(i, i + batchSize);
+                
+                await Promise.all(batch.map(async (path) => {
+                    try {
+                        const response = await fetch(
+                            `https://api.github.com/repos/${this.config.username}/${this.config.repo}/contents/${path}?ref=${this.config.branch}`,
+                            {
+                                headers: {
+                                    'Authorization': `token ${this.config.token}`,
+                                    'Accept': 'application/vnd.github.v3+json'
+                                }
+                            }
+                        );
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            // GitHub returns base64 encoded content
+                            zip.file(path, data.content, { base64: true });
+                            completed++;
+                        }
+                    } catch (err) {
+                        console.error(`Failed to fetch ${path}:`, err);
+                    }
+                }));
+            }
+
+            // Generate and download zip
+            const blob = await zip.generateAsync({ type: 'blob' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${this.config.repo}-${this.config.branch}.zip`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            this.showToast(`Downloaded ${completed} files`, 'success');
+        } catch (error) {
+            this.showToast('Download failed: ' + error.message, 'error');
+        } finally {
+            this.showLoading(false);
+        }
+    }
+
+    async downloadModifiedRepo() {
+        const allFiles = { ...this.repoFiles, ...this.stagedFiles };
+        const filePaths = Object.keys(allFiles).filter(path => !this.deletedFiles.has(path));
+
+        if (filePaths.length === 0) {
+            this.showToast('No files to download', 'error');
+            return;
+        }
+
+        this.showLoading(true);
+
+        try {
+            const zip = new JSZip();
+            let completed = 0;
+
+            this.showToast(`Preparing ${filePaths.length} files...`, 'info');
+
+            // Process files in batches
+            const batchSize = 5;
+            for (let i = 0; i < filePaths.length; i += batchSize) {
+                const batch = filePaths.slice(i, i + batchSize);
+
+                await Promise.all(batch.map(async (path) => {
+                    try {
+                        // Check if file has content (from stagedFiles)
+                        if (this.stagedFiles[path]) {
+                            zip.file(path, this.stagedFiles[path].content, { base64: true });
+                            completed++;
+                        } 
+                        // Otherwise fetch from GitHub
+                        else if (this.repoFiles[path]) {
+                            const response = await fetch(
+                                `https://api.github.com/repos/${this.config.username}/${this.config.repo}/contents/${path}?ref=${this.config.branch}`,
+                                {
+                                    headers: {
+                                        'Authorization': `token ${this.config.token}`,
+                                        'Accept': 'application/vnd.github.v3+json'
+                                    }
+                                }
+                            );
+
+                            if (response.ok) {
+                                const data = await response.json();
+                                zip.file(path, data.content, { base64: true });
+                                completed++;
+                            }
+                        }
+                    } catch (err) {
+                        console.error(`Failed to process ${path}:`, err);
+                    }
+                }));
+            }
+
+            // Generate and download zip
+            const blob = await zip.generateAsync({ type: 'blob' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${this.config.repo}-modified.zip`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            this.showToast(`Downloaded ${completed} files`, 'success');
+        } catch (error) {
+            this.showToast('Download failed: ' + error.message, 'error');
+        } finally {
+            this.showLoading(false);
+        }
+    }
+
     // ============ File Management ============
     async handleZipUpload(file) {
         this.showLoading(true);
@@ -347,6 +480,9 @@ class GitHubPusher {
                         <i data-lucide="chevron-right" class="folder-icon"></i>
                         <i data-lucide="folder"></i>
                         <span>${name}</span>
+                        <button class="delete-folder-btn" title="Delete folder and all contents">
+                            <i data-lucide="trash-2"></i>
+                        </button>
                     </div>
                     <div class="tree-children ${isCollapsed ? '' : 'expanded'}">
                         ${childrenHtml}
@@ -391,9 +527,21 @@ class GitHubPusher {
             });
         });
 
+        // Delete folder buttons
+        document.querySelectorAll('.delete-folder-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const folderPath = e.target.closest('.tree-item').dataset.folder;
+                this.deleteFolder(folderPath);
+            });
+        });
+
         // Folder collapse/expand
         document.querySelectorAll('.tree-item.folder').forEach(folder => {
             folder.addEventListener('click', (e) => {
+                // Don't collapse if clicking delete button
+                if (e.target.closest('.delete-folder-btn')) return;
+
                 const folderPath = folder.dataset.folder;
                 const children = folder.nextElementSibling;
                 
@@ -429,6 +577,39 @@ class GitHubPusher {
         this.renderFileTree();
         this.updateChanges();
         this.showToast('File marked for deletion', 'success');
+    }
+
+    deleteFolder(folderPath) {
+        // Get all files in this folder (including subfolders)
+        const allFiles = { ...this.repoFiles, ...this.stagedFiles };
+        const filesToDelete = Object.keys(allFiles).filter(path => 
+            path.startsWith(folderPath + '/') || path === folderPath
+        );
+
+        if (filesToDelete.length === 0) {
+            this.showToast('No files in this folder', 'error');
+            return;
+        }
+
+        if (!confirm(`Delete folder "${folderPath}" and all ${filesToDelete.length} files inside?`)) return;
+
+        // Delete all files in the folder
+        filesToDelete.forEach(path => {
+            // Remove from staged files if present
+            delete this.stagedFiles[path];
+            
+            // If it's a repo file, mark for deletion
+            if (this.repoFiles[path]) {
+                this.deletedFiles.add(path);
+            }
+
+            // Remove from selection
+            this.selectedFiles.delete(path);
+        });
+
+        this.renderFileTree();
+        this.updateChanges();
+        this.showToast(`Deleted folder with ${filesToDelete.length} files`, 'success');
     }
 
     async previewFile(path) {
@@ -983,6 +1164,9 @@ class GitHubPusher {
                 this.handleZipUpload(e.target.files[0]);
             }
         });
+
+        document.getElementById('downloadRepo').addEventListener('click', () => this.downloadRepo());
+        document.getElementById('downloadModified').addEventListener('click', () => this.downloadModifiedRepo());
 
         document.getElementById('fileSearch').addEventListener('input', (e) => {
             // TODO: Implement search filtering
